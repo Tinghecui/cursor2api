@@ -183,59 +183,66 @@ export async function sendCursorRequest(
 
     console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}`);
 
-    const resp = await fetch(CURSOR_CHAT_API, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(req),
-    });
+    // 请求级超时
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000); // 2分钟
 
-    if (!resp.ok) {
-        const body = await resp.text();
-        throw new Error(`Cursor API 错误: HTTP ${resp.status} - ${body}`);
-    }
+    try {
+        const resp = await fetch(CURSOR_CHAT_API, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(req),
+            signal: controller.signal,
+        });
 
-    if (!resp.body) {
-        throw new Error('Cursor API 响应无 body');
-    }
+        if (!resp.ok) {
+            const body = await resp.text();
+            throw new Error(`Cursor API 错误: HTTP ${resp.status} - ${body}`);
+        }
 
-    // 流式读取 SSE 响应
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+        if (!resp.body) {
+            throw new Error('Cursor API 响应无 body');
+        }
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        // 流式读取 SSE 响应
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-        // 保留最后一个不完整的行
-        buffer = lines.pop() || '';
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
 
-        for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim();
-            if (!data) continue;
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const data = line.slice(6).trim();
+                if (!data) continue;
 
-            try {
-                const event: CursorSSEEvent = JSON.parse(data);
-                onChunk(event);
-            } catch {
-                // 非 JSON 数据，忽略
+                try {
+                    const event: CursorSSEEvent = JSON.parse(data);
+                    onChunk(event);
+                } catch {
+                    // 非 JSON 数据，忽略
+                }
             }
         }
-    }
 
-    // 处理剩余的 buffer
-    if (buffer.startsWith('data: ')) {
-        const data = buffer.slice(6).trim();
-        if (data) {
-            try {
-                const event: CursorSSEEvent = JSON.parse(data);
-                onChunk(event);
-            } catch { /* ignore */ }
+        // 处理剩余 buffer
+        if (buffer.startsWith('data: ')) {
+            const data = buffer.slice(6).trim();
+            if (data) {
+                try {
+                    const event: CursorSSEEvent = JSON.parse(data);
+                    onChunk(event);
+                } catch { /* ignore */ }
+            }
         }
+    } finally {
+        clearTimeout(timeout);
     }
 }
 

@@ -15,6 +15,7 @@ import type {
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
+import { getConfig } from './config.js';
 
 function msgId(): string {
     return 'msg_' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -27,12 +28,11 @@ function toolId(): string {
 // ==================== 模型列表 ====================
 
 export function listModels(_req: Request, res: Response): void {
+    const model = getConfig().cursorModel;
     res.json({
         object: 'list',
         data: [
-            { id: 'claude-sonnet-4-20250514', object: 'model', created: 1700000000, owned_by: 'anthropic' },
-            { id: 'claude-3.5-sonnet', object: 'model', created: 1700000000, owned_by: 'anthropic' },
-            { id: 'claude-3-7-sonnet', object: 'model', created: 1700000000, owned_by: 'anthropic' },
+            { id: model, object: 'model', created: 1700000000, owned_by: 'anthropic' },
         ],
     });
 }
