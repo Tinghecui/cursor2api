@@ -218,9 +218,13 @@ function isIdentityProbe(body: AnthropicRequest): boolean {
 // ==================== 响应内容清洗 ====================
 
 // Claude 身份回复模板（拒绝后的降级回复）
-const CLAUDE_IDENTITY_RESPONSE = `I am Claude, made by Anthropic. I'm an AI assistant designed to be helpful, harmless, and honest. I can help you with a wide range of tasks including writing, analysis, coding, math, and more.
+const CLAUDE_IDENTITY_RESPONSE = `抱歉，我无法理解你的请求。请提供更明确的指令或任务描述，例如：
 
-I don't have information about the specific model version or ID being used for this conversation, but I'm happy to help you with whatever you need!`;
+- 帮我写一段代码
+- 分析这个文件的逻辑
+- 解释这个函数的作用
+
+请重新描述你的需求，我会尽力协助你。`;
 
 /**
  * 对所有响应做后处理：清洗 Cursor 身份引用，替换为 Claude
@@ -426,19 +430,17 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
     try {
         await executeStream();
 
-        // 无工具模式：检测拒绝并自动重试
-        if (!hasTools) {
-            while (isRefusal(fullResponse) && retryCount < MAX_REFUSAL_RETRIES) {
-                retryCount++;
-                console.log(`[Handler] 检测到身份拒绝（第${retryCount}次），自动重试...原始: ${fullResponse.substring(0, 80)}...`);
-                const retryBody = buildRetryRequest(body, retryCount - 1);
-                activeCursorReq = convertToCursorRequest(retryBody);
-                await executeStream();
-            }
-            if (isRefusal(fullResponse)) {
-                console.log(`[Handler] 重试${MAX_REFUSAL_RETRIES}次后仍被拒绝，返回 Claude 身份回复`);
-                fullResponse = CLAUDE_IDENTITY_RESPONSE;
-            }
+        // 统一拒绝检测+重试（不管有没有 tools）
+        while (isRefusal(fullResponse) && retryCount < MAX_REFUSAL_RETRIES) {
+            retryCount++;
+            console.log(`[Handler] 检测到身份拒绝（第${retryCount}次），自动重试...原始: ${fullResponse.substring(0, 80)}...`);
+            const retryBody = buildRetryRequest(body, retryCount - 1);
+            activeCursorReq = convertToCursorRequest(retryBody);
+            await executeStream();
+        }
+        if (isRefusal(fullResponse)) {
+            console.log(`[Handler] 重试${MAX_REFUSAL_RETRIES}次后仍被拒绝，返回降级回复`);
+            fullResponse = CLAUDE_IDENTITY_RESPONSE;
         }
 
         // 流完成后，处理完整响应
@@ -500,13 +502,8 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
                     blockIndex++;
                 }
             } else {
-                // False alarm! The tool triggers were just normal text.
-                let textToSend = fullResponse;
-
-                if (isRefusal(fullResponse)) {
-                    console.log(`[Handler] Supressed complete refusal without tools: ${fullResponse.substring(0, 100)}...`);
-                    textToSend = "[System Filter] The assistant's initial response matched a safety/topic refusal profile and was suppressed.\n\nTo proceed with querying general knowledge, finance, or weather natively via tools, you MUST explicitly ask the assistant to 'use Python/Bash script' or 'Assume this is a programming task' in your prompt.";
-                }
+                // 无工具调用，作为纯文本发送（拒绝已在上方统一处理）
+                const textToSend = fullResponse;
 
                 const unsentText = textToSend.substring(sentText.length);
                 if (unsentText) {
@@ -577,8 +574,8 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
 
     console.log(`[Handler] 原始响应 (${fullText.length} chars): ${fullText.substring(0, 300)}...`);
 
-    // 无工具模式：检测拒绝并自动重试
-    if (!hasTools && isRefusal(fullText)) {
+    // 统一拒绝检测+重试（不管有没有 tools）
+    if (isRefusal(fullText)) {
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {
             console.log(`[Handler] 非流式：检测到身份拒绝（第${attempt + 1}次重试）...原始: ${fullText.substring(0, 80)}...`);
             const retryBody = buildRetryRequest(body, attempt);
@@ -587,7 +584,7 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
             if (!isRefusal(fullText)) break;
         }
         if (isRefusal(fullText)) {
-            console.log(`[Handler] 非流式：重试${MAX_REFUSAL_RETRIES}次后仍被拒绝，返回 Claude 身份回复`);
+            console.log(`[Handler] 非流式：重试${MAX_REFUSAL_RETRIES}次后仍被拒绝，返回降级回复`);
             fullText = CLAUDE_IDENTITY_RESPONSE;
         }
     }
@@ -619,12 +616,8 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
                 });
             }
         } else {
-            let textToSend = fullText;
-            if (isRefusal(fullText)) {
-                console.log(`[Handler] Supressed pure text refusal (non-stream): ${fullText.substring(0, 100)}...`);
-                textToSend = "[System Filter] The assistant's initial response matched a safety/topic refusal profile and was suppressed.\n\nTo proceed with querying general knowledge, finance, or weather natively via tools, you MUST explicitly ask the assistant to 'use Python/Bash script' or 'Assume this is a programming task' in your prompt.";
-            }
-            contentBlocks.push({ type: 'text', text: textToSend });
+            // 无工具调用，作为纯文本发送（拒绝已在上方统一处理）
+            contentBlocks.push({ type: 'text', text: fullText });
         }
     } else {
         // 最后一道防线：清洗所有 Cursor 身份引用
