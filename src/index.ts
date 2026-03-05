@@ -29,19 +29,45 @@ app.use((_req, res, next) => {
     next();
 });
 
+// ==================== API 密钥鉴权 ====================
+
+const API_KEY = process.env.API_KEY || '';
+
+function authMiddleware(req: express.Request, res: express.Response, next: express.NextFunction): void {
+    if (!API_KEY) {
+        // 未配置密钥则跳过鉴权
+        next();
+        return;
+    }
+
+    // 支持 x-api-key 头（Anthropic 风格）和 Authorization: Bearer 头（OpenAI 风格）
+    const key = req.headers['x-api-key'] as string
+        || (req.headers['authorization'] as string)?.replace(/^Bearer\s+/i, '');
+
+    if (key !== API_KEY) {
+        res.status(401).json({
+            type: 'error',
+            error: { type: 'authentication_error', message: 'Invalid API key' },
+        });
+        return;
+    }
+
+    next();
+}
+
 // ==================== 路由 ====================
 
 // Anthropic Messages API
-app.post('/v1/messages', handleMessages);
-app.post('/messages', handleMessages);
+app.post('/v1/messages', authMiddleware, handleMessages);
+app.post('/messages', authMiddleware, handleMessages);
 
 // OpenAI Chat Completions API（兼容）
-app.post('/v1/chat/completions', handleOpenAIChatCompletions);
-app.post('/chat/completions', handleOpenAIChatCompletions);
+app.post('/v1/chat/completions', authMiddleware, handleOpenAIChatCompletions);
+app.post('/chat/completions', authMiddleware, handleOpenAIChatCompletions);
 
 // Token 计数
-app.post('/v1/messages/count_tokens', countTokens);
-app.post('/messages/count_tokens', countTokens);
+app.post('/v1/messages/count_tokens', authMiddleware, countTokens);
+app.post('/messages/count_tokens', authMiddleware, countTokens);
 
 // OpenAI 兼容模型列表
 app.get('/v1/models', listModels);

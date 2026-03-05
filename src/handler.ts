@@ -30,7 +30,7 @@ const REFUSAL_PATTERNS = [
     // English identity refusal
     /Cursor(?:'s)?\s+support\s+assistant/i,
     /support\s+assistant\s+for\s+Cursor/i,
-    /I[''’]m\s+sorry/i,
+    /I[''']/i,
     /I\s+am\s+sorry/i,
     /not\s+able\s+to\s+fulfill/i,
     /cannot\s+perform/i,
@@ -50,7 +50,7 @@ const REFUSAL_PATTERNS = [
     /I'?m\s+not\s+(?:able|designed)\s+to/i,
     /I\s+don't\s+have\s+(?:the\s+)?(?:ability|capability)/i,
     /questions\s+about\s+(?:Cursor|the\s+(?:AI\s+)?code\s+editor)/i,
-    // English topic refusal — Cursor 拒绝非编程话题
+    // English topic refusal
     /help\s+with\s+(?:coding|programming)\s+and\s+Cursor/i,
     /Cursor\s+IDE\s+(?:questions|features|related)/i,
     /unrelated\s+to\s+(?:programming|coding)(?:\s+or\s+Cursor)?/i,
@@ -80,7 +80,10 @@ const REFUSAL_PATTERNS = [
     /只能帮助.*(?:编程|代码|开发)/,
 ];
 
-<<<<<<< HEAD
+function isRefusal(text: string): boolean {
+    return REFUSAL_PATTERNS.some(p => p.test(text));
+}
+
 // ==================== Token 估算 ====================
 
 /**
@@ -89,7 +92,6 @@ const REFUSAL_PATTERNS = [
  */
 function estimateTokens(text: string): number {
     if (!text) return 0;
-    // 统计非 ASCII 字符（中文、日文等）
     const nonAsciiCount = (text.match(/[^\x00-\x7F]/g) || []).length;
     const asciiCount = text.length - nonAsciiCount;
     return Math.ceil(asciiCount / 4 + nonAsciiCount / 1.5);
@@ -101,7 +103,6 @@ function estimateTokens(text: string): number {
 function estimateInputTokens(body: AnthropicRequest): number {
     let total = 0;
 
-    // system prompt
     if (body.system) {
         const systemText = typeof body.system === 'string'
             ? body.system
@@ -109,7 +110,6 @@ function estimateInputTokens(body: AnthropicRequest): number {
         total += estimateTokens(systemText);
     }
 
-    // messages
     for (const msg of body.messages ?? []) {
         const text = typeof msg.content === 'string'
             ? msg.content
@@ -117,7 +117,6 @@ function estimateInputTokens(body: AnthropicRequest): number {
         total += estimateTokens(text);
     }
 
-    // tools 定义也占 token
     if (body.tools && body.tools.length > 0) {
         total += estimateTokens(JSON.stringify(body.tools));
     }
@@ -138,10 +137,6 @@ function simulateCacheTokens(inputTokens: number) {
         cache_read_input_tokens: Math.round(inputTokens * (1 - r)),
         cache_creation_input_tokens: Math.round(inputTokens * writeRatio),
     };
-=======
-function isRefusal(text: string): boolean {
-    return REFUSAL_PATTERNS.some(p => p.test(text));
->>>>>>> upstream/main
 }
 
 // ==================== 模型列表 ====================
@@ -176,9 +171,9 @@ export function countTokens(req: Request, res: Response): void {
 
 // ==================== 身份探针拦截 ====================
 
-// 关键词检测（宽松匹配）：只要用户消息包含这些关键词组合就判定为身份探针
+// 关键词检测（宽松匹配）
 const IDENTITY_PROBE_PATTERNS = [
-    // 精确短句（原有）
+    // 精确短句
     /^\s*(who are you\??|你是谁[呀啊吗]?\??|what is your name\??|你叫什么\??|你叫什么名字\??|what are you\??|你是什么\??|Introduce yourself\??|自我介绍一下\??|hi\??|hello\??|hey\??|你好\??|在吗\??|哈喽\??)\s*$/i,
     // 问模型/身份类
     /(?:什么|哪个|啥)\s*模型/,
@@ -229,7 +224,6 @@ I don't have information about the specific model version or ID being used for t
 
 /**
  * 对所有响应做后处理：清洗 Cursor 身份引用，替换为 Claude
- * 这是最后一道防线，确保用户永远看不到 Cursor 相关的身份信息
  */
 function sanitizeResponse(text: string): string {
     let result = text;
@@ -242,30 +236,21 @@ function sanitizeResponse(text: string): string {
     result = result.replace(/I\s+run\s+(?:on|in)\s+Cursor(?:'s)?\s+(?:support\s+)?system/gi, 'I am Claude, running on Anthropic\'s infrastructure');
 
     // === English topic refusal replacements ===
-    // "help with coding and Cursor IDE questions" -> "help with a wide range of tasks"
     result = result.replace(/(?:help\s+with\s+)?coding\s+and\s+Cursor\s+IDE\s+questions/gi, 'help with a wide range of tasks');
     result = result.replace(/(?:I'?m|I\s+am)\s+here\s+to\s+help\s+with\s+coding\s+and\s+Cursor[^.]*\./gi, 'I am Claude, an AI assistant by Anthropic. I can help with a wide range of tasks.');
-    // "Cursor IDE features" -> "AI assistance"
     result = result.replace(/\*\*Cursor\s+IDE\s+features\*\*/gi, '**AI capabilities**');
     result = result.replace(/Cursor\s+IDE\s+(?:features|questions|related)/gi, 'various topics');
-    // "unrelated to programming or Cursor" -> "outside my usual scope, but I'll try"
     result = result.replace(/unrelated\s+to\s+programming\s+or\s+Cursor/gi, 'a general knowledge question');
     result = result.replace(/unrelated\s+to\s+(?:programming|coding)/gi, 'a general knowledge question');
-    // "Cursor-related question" -> "question"
     result = result.replace(/(?:a\s+)?(?:programming|coding|Cursor)[- ]related\s+question/gi, 'a question');
-    // "ask a programming or Cursor-related question" -> "ask me anything" (must be before generic patterns)
     result = result.replace(/(?:please\s+)?ask\s+a\s+(?:programming|coding)\s+(?:or\s+(?:Cursor[- ]related\s+)?)?question/gi, 'feel free to ask me anything');
-    // Generic "Cursor" in capability descriptions
     result = result.replace(/questions\s+about\s+Cursor(?:'s)?\s+(?:features|editor|IDE|pricing|the\s+AI)/gi, 'your questions');
     result = result.replace(/help\s+(?:you\s+)?with\s+(?:questions\s+about\s+)?Cursor/gi, 'help you with your tasks');
     result = result.replace(/about\s+the\s+Cursor\s+(?:AI\s+)?(?:code\s+)?editor/gi, '');
     result = result.replace(/Cursor(?:'s)?\s+(?:features|editor|code\s+editor|IDE),?\s*(?:pricing|troubleshooting|billing)/gi, 'programming, analysis, and technical questions');
-    // Bullet list items mentioning Cursor
     result = result.replace(/(?:finding\s+)?relevant\s+Cursor\s+(?:or\s+)?(?:coding\s+)?documentation/gi, 'relevant documentation');
     result = result.replace(/(?:finding\s+)?relevant\s+Cursor/gi, 'relevant');
-    // "AI chat, code completion, rules, context, etc." - context clue of Cursor features, replace
     result = result.replace(/AI\s+chat,\s+code\s+completion,\s+rules,\s+context,?\s+etc\.?/gi, 'writing, analysis, coding, math, and more');
-    // Straggler: any remaining "or Cursor" / "and Cursor"
     result = result.replace(/(?:\s+or|\s+and)\s+Cursor(?![\w])/gi, '');
     result = result.replace(/Cursor(?:\s+or|\s+and)\s+/gi, '');
 
@@ -359,7 +344,6 @@ const MAX_REFUSAL_RETRIES = 2;
 
 /**
  * 当检测到拒绝时，用 IDE 上下文重新包装原始请求体并重试
- * 策略：把用户原始问题包裹在一个"编程任务"情景中，绕过身份锁定
  */
 function buildRetryRequest(body: AnthropicRequest, attempt: number): AnthropicRequest {
     const reframePrefixes = [
@@ -368,7 +352,6 @@ function buildRetryRequest(body: AnthropicRequest, attempt: number): AnthropicRe
     ];
     const prefix = reframePrefixes[Math.min(attempt, reframePrefixes.length - 1)];
 
-    // Deep clone messages and reframe the last user message
     const newMessages = JSON.parse(JSON.stringify(body.messages)) as AnthropicRequest['messages'];
     for (let i = newMessages.length - 1; i >= 0; i--) {
         if (newMessages[i].role === 'user') {
@@ -436,9 +419,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
         await sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
             if (event.type !== 'text-delta' || !event.delta) return;
             fullResponse += event.delta;
-
             // 有工具时始终缓冲，无工具时也缓冲（用于拒绝检测）
-            // 不再直接流式发送，统一在流结束后处理
         });
     };
 
@@ -469,13 +450,11 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
             if (toolCalls.length > 0) {
                 stopReason = 'tool_use';
 
-                // Check if the residual text is a known refusal, if so, drop it completely!
-                if (REFUSAL_PATTERNS.some(p => p.test(cleanText))) {
+                if (isRefusal(cleanText)) {
                     console.log(`[Handler] Supressed refusal text generated during tool usage: ${cleanText.substring(0, 100)}...`);
                     cleanText = '';
                 }
 
-                // Any clean text is sent as a single block before the tool blocks
                 const unsentCleanText = cleanText.substring(sentText.length).trim();
 
                 if (unsentCleanText) {
@@ -521,8 +500,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
                     blockIndex++;
                 }
             } else {
-                // False alarm! The tool triggers were just normal text. 
-                // We must send the remaining unsent fullResponse.
+                // False alarm! The tool triggers were just normal text.
                 let textToSend = fullResponse;
 
                 if (isRefusal(fullResponse)) {

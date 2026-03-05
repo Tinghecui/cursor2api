@@ -50,7 +50,7 @@ export function resolveModel(requestedModel: string): SupportedModel {
  * 将工具定义构建为格式指令
  * 使用 Cursor IDE 原生场景融合：不覆盖模型身份，而是顺应它在 IDE 内的角色
  */
-function buildToolInstructions(tools: AnthropicTool[], hasCommunicationTool: boolean, modelId: string = 'claude-sonnet-4-6'): string {
+function buildToolInstructions(tools: AnthropicTool[], hasCommunicationTool: boolean): string {
     if (!tools || tools.length === 0) return '';
 
     const toolList = tools.map((tool) => {
@@ -313,8 +313,11 @@ function extractToolResultText(block: AnthropicContentBlock): string {
     return String(block.content);
 }
 
-// ==================== 响应解析 ====================
+// ==================== JSON 容错解析 ====================
 
+/**
+ * 容错 JSON 解析：处理字符串内未转义的换行符和尾随逗号
+ */
 function tolerantParse(jsonStr: string): any {
     try {
         return JSON.parse(jsonStr);
@@ -349,6 +352,8 @@ function tolerantParse(jsonStr: string): any {
         return JSON.parse(fixed);
     }
 }
+
+// ==================== 响应解析 ====================
 
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
