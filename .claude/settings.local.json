@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir e:\\\\CodeAI\\\\github\\\\cursor2api:*)",
+      "Bash(cmd:*)",
+      "WebFetch(domain:wttr.in)",
+      "mcp__fetch__fetch"
+    ]
+  }
+}
