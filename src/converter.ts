@@ -459,6 +459,56 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
     return blocks;
 }
 
+/**
+ * 提取裸 JSON 工具调用（无 markdown fence）
+ */
+function extractBareToolJsonBlocks(text: string): JsonActionBlock[] {
+    const blocks: JsonActionBlock[] = [];
+    const toolObjectStartRe = /\{\s*"tool"\s*:\s*"/g;
+    let m: RegExpExecArray | null;
+
+    while ((m = toolObjectStartRe.exec(text)) !== null) {
+        const start = m.index;
+
+        let inString = false;
+        let depth = 0;
+        let end = -1;
+
+        for (let i = start; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '"' && !isEscapedAt(text, i)) {
+                inString = !inString;
+            }
+            if (inString) continue;
+
+            if (ch === '{') {
+                depth++;
+            } else if (ch === '}') {
+                depth--;
+                if (depth === 0) {
+                    end = i + 1;
+                    break;
+                }
+                if (depth < 0) break;
+            }
+        }
+
+        if (end < 0) {
+            continue;
+        }
+
+        const candidate = text.slice(start, end);
+        blocks.push({
+            raw: candidate,
+            json: candidate,
+        });
+
+        toolObjectStartRe.lastIndex = end;
+    }
+
+    return blocks;
+}
+
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
     cleanText: string;
@@ -467,8 +517,9 @@ export function parseToolCalls(responseText: string): {
     let cleanText = responseText;
 
     const blocks = extractJsonActionBlocks(responseText);
+    const blocksToParse = blocks.length > 0 ? blocks : extractBareToolJsonBlocks(responseText);
 
-    for (const block of blocks) {
+    for (const block of blocksToParse) {
         try {
             const parsed = tolerantParse(block.json);
             // check for tool or name

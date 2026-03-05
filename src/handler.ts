@@ -30,7 +30,6 @@ const REFUSAL_PATTERNS = [
     // English identity refusal
     /Cursor(?:'s)?\s+support\s+assistant/i,
     /support\s+assistant\s+for\s+Cursor/i,
-    /I[''']/i,
     /I\s+am\s+sorry/i,
     /not\s+able\s+to\s+fulfill/i,
     /cannot\s+perform/i,
