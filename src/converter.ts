@@ -320,50 +320,144 @@ function extractToolResultText(block: AnthropicContentBlock): string {
 // ==================== JSON 容错解析 ====================
 
 /**
- * 容错 JSON 解析：处理字符串内未转义的换行符和尾随逗号
+ * 检查位置 i 前面是否有奇数个反斜杠（即该位置字符被转义）
  */
-function tolerantParse(jsonStr: string): any {
-    try {
-        return JSON.parse(jsonStr);
-    } catch (e) {
-        let inString = false;
-        let escaped = false;
-        let fixed = '';
-        for (let i = 0; i < jsonStr.length; i++) {
-            const char = jsonStr[i];
-            if (char === '\\' && !escaped) {
-                escaped = true;
-                fixed += char;
-            } else if (char === '"' && !escaped) {
-                inString = !inString;
-                fixed += char;
-                escaped = false;
-            } else {
-                if (inString && (char === '\n' || char === '\r')) {
-                    fixed += char === '\n' ? '\\n' : '\\r';
-                } else if (inString && char === '\t') {
-                    fixed += '\\t';
-                } else {
-                    fixed += char;
-                }
-                escaped = false;
+function isEscapedAt(s: string, i: number): boolean {
+    let n = 0;
+    for (let k = i - 1; k >= 0 && s[k] === '\\'; k--) n++;
+    return n % 2 === 1;
+}
+
+/**
+ * 转义字符串内的控制字符（换行、回车、制表符等）
+ */
+function escapeControlCharsInStrings(input: string): string {
+    let out = '';
+    let inString = false;
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        if (ch === '"' && !isEscapedAt(input, i)) {
+            inString = !inString;
+            out += ch;
+            continue;
+        }
+        if (inString) {
+            if (ch === '\n') { out += '\\n'; continue; }
+            if (ch === '\r') { out += '\\r'; continue; }
+            if (ch === '\t') { out += '\\t'; continue; }
+            const code = ch.charCodeAt(0);
+            if (code < 0x20) {
+                out += `\\u${code.toString(16).padStart(4, '0')}`;
+                continue;
             }
         }
-
-        // Remove trailing commas
-        fixed = fixed.replace(/,\s*([}\]])/g, '$1');
-
-        // Fix unescaped backslashes in strings (e.g. Windows paths like \主要工作)
-        fixed = fixed.replace(/"((?:[^"\\]|\\.)*)"/g, (_match, inner) => {
-            const fixedInner = inner.replace(/\\(?!["\\bfnrtu])/g, '\\\\');
-            return `"${fixedInner}"`;
-        });
-
-        return JSON.parse(fixed);
+        out += ch;
     }
+    return out;
+}
+
+/**
+ * 仅在字符串外部移除尾随逗号
+ */
+function removeTrailingCommasOutsideStrings(input: string): string {
+    let out = '';
+    let inString = false;
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        if (ch === '"' && !isEscapedAt(input, i)) {
+            inString = !inString;
+            out += ch;
+            continue;
+        }
+
+        if (!inString && ch === ',') {
+            let j = i + 1;
+            while (j < input.length && /\s/.test(input[j])) j++;
+            if (input[j] === '}' || input[j] === ']') continue;
+        }
+
+        out += ch;
+    }
+    return out;
+}
+
+/**
+ * 容错 JSON 解析：分阶段修复
+ */
+function tolerantParse(jsonStr: string): any {
+    const raw = jsonStr.trim();
+
+    // 第1层：直接解析
+    try { return JSON.parse(raw); } catch {}
+
+    // 第2层：转义字符串内的控制字符
+    const fixed1 = escapeControlCharsInStrings(raw);
+    try { return JSON.parse(fixed1); } catch {}
+
+    // 第3层：在字符串外移除尾随逗号
+    const fixed2 = removeTrailingCommasOutsideStrings(fixed1);
+    try { return JSON.parse(fixed2); } catch {}
+
+    throw new Error('tolerantParse: unable to parse tool JSON');
 }
 
 // ==================== 响应解析 ====================
+
+type JsonActionBlock = { raw: string; json: string };
+
+/**
+ * 用括号深度扫描提取 JSON action 块，避免被字符串内的反引号截断
+ */
+function extractJsonActionBlocks(text: string): JsonActionBlock[] {
+    const blocks: JsonActionBlock[] = [];
+    const openRe = /```json(?:\s+action)?\s*/g;
+    let m: RegExpExecArray | null;
+
+    while ((m = openRe.exec(text)) !== null) {
+        const blockStart = m.index;
+        const jsonStart = m.index + m[0].length;
+
+        let inString = false;
+        let depth = 0;
+        let seenRoot = false;
+        let jsonEnd = -1;
+
+        for (let i = jsonStart; i < text.length; i++) {
+            const ch = text[i];
+            if (ch === '"' && !isEscapedAt(text, i)) inString = !inString;
+            if (inString) continue;
+
+            if (ch === '{' || ch === '[') {
+                depth++;
+                seenRoot = true;
+            } else if (ch === '}' || ch === ']') {
+                depth--;
+                if (seenRoot && depth === 0) {
+                    jsonEnd = i + 1;
+                    break;
+                }
+            }
+        }
+        if (jsonEnd < 0) continue;
+
+        // 查找结束的 ```
+        const tail = text.slice(jsonEnd);
+        const close = tail.match(/^\s*```/);
+        if (!close) continue;
+
+        const rawEnd = jsonEnd + close[0].length;
+        blocks.push({
+            raw: text.slice(blockStart, rawEnd),
+            json: text.slice(jsonStart, jsonEnd),
+        });
+
+        openRe.lastIndex = rawEnd;
+    }
+
+    return blocks;
+}
 
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
@@ -372,29 +466,22 @@ export function parseToolCalls(responseText: string): {
     const toolCalls: ParsedToolCall[] = [];
     let cleanText = responseText;
 
-    const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
+    const blocks = extractJsonActionBlocks(responseText);
 
-    let match: RegExpExecArray | null;
-    while ((match = fullBlockRegex.exec(responseText)) !== null) {
-        let isToolCall = false;
+    for (const block of blocks) {
         try {
-            const parsed = tolerantParse(match[1]);
+            const parsed = tolerantParse(block.json);
             // check for tool or name
             if (parsed.tool || parsed.name) {
                 toolCalls.push({
                     name: parsed.tool || parsed.name,
                     arguments: parsed.parameters || parsed.arguments || parsed.input || {}
                 });
-                isToolCall = true;
+                // 移除已解析的调用块
+                cleanText = cleanText.replace(block.raw, '');
             }
         } catch (e) {
-            // Ignored, not a valid json tool call
             console.error('[Converter] tolerantParse 失败:', e);
-        }
-
-        if (isToolCall) {
-            // 移除已解析的调用块
-            cleanText = cleanText.replace(match[0], '');
         }
     }
 
