@@ -276,10 +276,6 @@ function extractToolResultText(block: AnthropicContentBlock): string {
 
 // ==================== 响应解析 ====================
 
-/**
- * 从 AI 响应文本中解析工具调用
- * 匹配 ```json action ... ``` 块
- */
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
     cleanText: string;
@@ -287,27 +283,29 @@ export function parseToolCalls(responseText: string): {
     const toolCalls: ParsedToolCall[] = [];
     let cleanText = responseText;
 
-    const regex = /```json\s+action[\s\S]*?\{([\s\S]*?)\}\s*```/g;
-
-    // 我们先把整块内容取出来
-    const fullBlockRegex = /```json\s+action\s*([\s\S]*?)\s*```/g;
+    const fullBlockRegex = /```json(?:\s+action)?\s*([\s\S]*?)\s*```/g;
 
     let match: RegExpExecArray | null;
     while ((match = fullBlockRegex.exec(responseText)) !== null) {
+        let isToolCall = false;
         try {
             const parsed = JSON.parse(match[1]);
-            if (parsed.tool) {
+            // check for tool or name
+            if (parsed.tool || parsed.name) {
                 toolCalls.push({
-                    name: parsed.tool,
-                    arguments: parsed.parameters || {}
+                    name: parsed.tool || parsed.name,
+                    arguments: parsed.parameters || parsed.arguments || parsed.input || {}
                 });
+                isToolCall = true;
             }
         } catch (e) {
-            console.error('[Converter] Failed to parse JSON action block:', e);
+            // Ignored, not a valid json tool call
         }
 
-        // 移除已解析的调用块
-        cleanText = cleanText.replace(match[0], '');
+        if (isToolCall) {
+            // 移除已解析的调用块
+            cleanText = cleanText.replace(match[0], '');
+        }
     }
 
     return { toolCalls, cleanText: cleanText.trim() };
@@ -317,7 +315,7 @@ export function parseToolCalls(responseText: string): {
  * 检查文本是否包含工具调用
  */
 export function hasToolCalls(text: string): boolean {
-    return text.includes('```json action');
+    return text.includes('```json');
 }
 
 /**
@@ -325,9 +323,10 @@ export function hasToolCalls(text: string): boolean {
  */
 export function isToolCallComplete(text: string): boolean {
     const openCount = (text.match(/```json\s+action/g) || []).length;
-    const closeCount = (text.match(/```(?!json\s+action)/g) || []).length;
-    // 粗略估计：如果是 ``` 结尾的，通常是结束了。这里不做完全精确匹配
-    return true;
+    // Count closing ``` that are NOT part of opening ```json action
+    const allBackticks = (text.match(/```/g) || []).length;
+    const closeCount = allBackticks - openCount;
+    return openCount > 0 && closeCount >= openCount;
 }
 
 // ==================== 工具函数 ====================

@@ -108,6 +108,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
     });
 
     let fullResponse = '';
+    let sentText = '';
     let blockIndex = 0;
     let textBlockStarted = false;
 
@@ -140,6 +141,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
                 index: blockIndex,
                 delta: { type: 'text_delta', text: event.delta },
             });
+            sentText += event.delta;
         });
 
         // 流完成后，处理完整响应
@@ -151,10 +153,33 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
             if (toolCalls.length > 0) {
                 stopReason = 'tool_use';
 
-                // 如果有工具调用前的文本，确保文本块已关闭
+                // find match length of sentText in cleanText
+                let matchLen = 0;
+                for (let i = Math.min(cleanText.length, sentText.length); i >= 0; i--) {
+                    if (cleanText.startsWith(sentText.substring(0, i))) {
+                        matchLen = i;
+                        break;
+                    }
+                }
+                const unsentCleanText = cleanText.substring(matchLen).trim();
+
+                // 如果解析后有干净的文本（工具调用之外的文本），发送文本块
+                if (unsentCleanText) {
+                    if (!textBlockStarted) {
+                        writeSSE(res, 'content_block_start', {
+                            type: 'content_block_start', index: blockIndex,
+                            content_block: { type: 'text', text: '' },
+                        });
+                        textBlockStarted = true;
+                    }
+                    writeSSE(res, 'content_block_delta', {
+                        type: 'content_block_delta', index: blockIndex,
+                        delta: { type: 'text_delta', text: (sentText.endsWith('\n') ? '' : '\n') + unsentCleanText }
+                    });
+                }
+
+                // 如果有文本块，确保完成结束
                 if (textBlockStarted) {
-                    // 需要重新计算：流式发送的文本可能包含了工具调用标签之前的部分
-                    // 这里我们结束当前文本块
                     writeSSE(res, 'content_block_stop', {
                         type: 'content_block_stop', index: blockIndex,
                     });
@@ -162,13 +187,6 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
                     textBlockStarted = false;
                 }
 
-                // 如果解析后有干净的文本（工具调用之外的文本），发送文本块
-                if (cleanText && !textBlockStarted) {
-                    // 文本可能已经通过流式增量发送了，这里的 cleanText 是去除工具调用后的剩余
-                    // 不需要重复发送
-                }
-
-                // 发送工具调用块
                 for (const tc of toolCalls) {
                     const tcId = toolId();
                     writeSSE(res, 'content_block_start', {
@@ -188,6 +206,23 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
                         type: 'content_block_stop', index: blockIndex,
                     });
                     blockIndex++;
+                }
+            } else {
+                // False alarm! The tool triggers were just normal text. 
+                // We must send the remaining unsent fullResponse.
+                const unsentText = fullResponse.substring(sentText.length);
+                if (unsentText) {
+                    if (!textBlockStarted) {
+                        writeSSE(res, 'content_block_start', {
+                            type: 'content_block_start', index: blockIndex,
+                            content_block: { type: 'text', text: '' },
+                        });
+                        textBlockStarted = true;
+                    }
+                    writeSSE(res, 'content_block_delta', {
+                        type: 'content_block_delta', index: blockIndex,
+                        delta: { type: 'text_delta', text: unsentText },
+                    });
                 }
             }
         }

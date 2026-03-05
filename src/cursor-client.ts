@@ -252,9 +252,10 @@ async function sendCursorRequestInner(
 
     console.log(`[Cursor] 发送请求: model=${req.model}, messages=${req.messages.length}`);
 
-    // 请求级超时
+    // 请求级超时（使用配置值）
+    const config = getConfig();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000); // 2分钟
+    const timeout = setTimeout(() => controller.abort(), config.timeout * 1000);
 
     try {
         const resp = await fetch(CURSOR_CHAT_API, {
