@@ -33,3 +33,7 @@ logs/
 # Build
 dist/
 build/
+
+# Deploy scripts (local only)
+DEPLOY.md
+deploy-to-server.sh

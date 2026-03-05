@@ -13,7 +13,7 @@ import type {
     AnthropicContentBlock,
     CursorSSEEvent,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete } from './converter.js';
+import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete, SUPPORTED_MODELS, resolveModel } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
 import { getConfig } from './config.js';
 
@@ -28,12 +28,14 @@ function toolId(): string {
 // ==================== 模型列表 ====================
 
 export function listModels(_req: Request, res: Response): void {
-    const model = getConfig().cursorModel;
     res.json({
         object: 'list',
-        data: [
-            { id: model, object: 'model', created: 1700000000, owned_by: 'anthropic' },
-        ],
+        data: SUPPORTED_MODELS.map(id => ({
+            id,
+            object: 'model',
+            created: 1700000000,
+            owned_by: 'anthropic',
+        })),
     });
 }
 
@@ -58,7 +60,8 @@ export function countTokens(req: Request, res: Response): void {
 export async function handleMessages(req: Request, res: Response): Promise<void> {
     const body = req.body as AnthropicRequest;
 
-    console.log(`[Handler] 收到请求: model=${body.model}, messages=${body.messages?.length}, stream=${body.stream}, tools=${body.tools?.length ?? 0}`);
+    const resolvedModel = resolveModel(body.model);
+    console.log(`[Handler] 收到请求: model=${body.model} → ${resolvedModel}, messages=${body.messages?.length}, stream=${body.stream}, tools=${body.tools?.length ?? 0}`);
 
     try {
         // 转换为 Cursor 请求
