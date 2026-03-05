@@ -4,15 +4,28 @@
  * 职责：
  * 1. 发送请求到 https://cursor.com/api/chat（带 Chrome TLS 指纹模拟 headers）
  * 2. 流式解析 SSE 响应
- * 3. 自动重试（最多 2 次）
+ * 3. 自动重试（最多 3 次，429 指数退避 2s→6s→18s）
+ * 4. 代理池轮换（round-robin，降低 IP 限流）
  *
  * 注：x-is-human token 验证已被 Cursor 停用，直接发送空字符串即可。
  */
 
 import type { CursorChatRequest, CursorSSEEvent } from './types.js';
 import { getConfig } from './config.js';
+import { ProxyAgent } from 'undici';
 
 const CURSOR_CHAT_API = 'https://cursor.com/api/chat';
+
+// 代理轮换
+let proxyIndex = 0;
+function getNextProxyDispatcher(): ProxyAgent | undefined {
+    const proxies = getConfig().proxies;
+    if (!proxies || proxies.length === 0) return undefined;
+    const url = proxies[proxyIndex % proxies.length];
+    proxyIndex++;
+    console.log(`[Cursor] 使用代理 #${proxyIndex}: ${url.replace(/\/\/.*@/, '//***@')}`);
+    return new ProxyAgent(url);
+}
 
 // Chrome 浏览器请求头模拟
 function getChromeHeaders(): Record<string, string> {
@@ -48,7 +61,7 @@ export async function sendCursorRequest(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
 ): Promise<void> {
-    const maxRetries = 2;
+    const maxRetries = 3;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             await sendCursorRequestInner(req, onChunk);
@@ -57,8 +70,10 @@ export async function sendCursorRequest(
             const msg = err instanceof Error ? err.message : String(err);
             console.error(`[Cursor] 请求失败 (${attempt}/${maxRetries}): ${msg}`);
             if (attempt < maxRetries) {
-                console.log(`[Cursor] 2s 后重试...`);
-                await new Promise(r => setTimeout(r, 2000));
+                const is429 = msg.includes('429') || msg.includes('Rate limit');
+                const delay = is429 ? 2000 * Math.pow(3, attempt - 1) : 2000;
+                console.log(`[Cursor] ${delay / 1000}s 后重试...`);
+                await new Promise(r => setTimeout(r, delay));
             } else {
                 throw err;
             }
@@ -85,7 +100,8 @@ async function sendCursorRequestInner(
             headers,
             body: JSON.stringify(req),
             signal: controller.signal,
-        });
+            ...(getConfig().proxies?.length ? { dispatcher: getNextProxyDispatcher() } : {}),
+        } as any);
 
         if (!resp.ok) {
             const body = await resp.text();

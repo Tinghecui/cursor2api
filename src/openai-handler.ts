@@ -20,10 +20,12 @@ import type {
     AnthropicContentBlock,
     AnthropicTool,
     CursorSSEEvent,
+    CursorChatRequest,
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
 import { getConfig } from './config.js';
+import { describeImage } from './vision.js';
 
 function chatId(): string {
     return 'chatcmpl-' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -39,7 +41,7 @@ function toolCallId(): string {
  * 将 OpenAI Chat Completions 请求转换为内部 Anthropic 格式
  * 这样可以完全复用现有的 convertToCursorRequest 管道
  */
-function convertToAnthropicRequest(body: OpenAIChatRequest): AnthropicRequest {
+async function convertToAnthropicRequest(body: OpenAIChatRequest): Promise<AnthropicRequest> {
     const messages: AnthropicMessage[] = [];
     let systemPrompt: string | undefined;
 
@@ -47,20 +49,20 @@ function convertToAnthropicRequest(body: OpenAIChatRequest): AnthropicRequest {
         switch (msg.role) {
             case 'system':
                 // OpenAI system → Anthropic system
-                systemPrompt = (systemPrompt ? systemPrompt + '\n\n' : '') + extractOpenAIContent(msg);
+                systemPrompt = (systemPrompt ? systemPrompt + '\n\n' : '') + await extractOpenAIContent(msg);
                 break;
 
             case 'user':
                 messages.push({
                     role: 'user',
-                    content: extractOpenAIContent(msg),
+                    content: await extractOpenAIContent(msg),
                 });
                 break;
 
             case 'assistant': {
                 // 助手消息可能包含 tool_calls
                 const blocks: AnthropicContentBlock[] = [];
-                const textContent = extractOpenAIContent(msg);
+                const textContent = await extractOpenAIContent(msg);
                 if (textContent) {
                     blocks.push({ type: 'text', text: textContent });
                 }
@@ -96,7 +98,7 @@ function convertToAnthropicRequest(body: OpenAIChatRequest): AnthropicRequest {
                     content: [{
                         type: 'tool_result',
                         tool_use_id: msg.tool_call_id,
-                        content: extractOpenAIContent(msg),
+                        content: await extractOpenAIContent(msg),
                     }] as AnthropicContentBlock[],
                 });
                 break;
@@ -129,14 +131,24 @@ function convertToAnthropicRequest(body: OpenAIChatRequest): AnthropicRequest {
 /**
  * 从 OpenAI 消息中提取文本内容
  */
-function extractOpenAIContent(msg: OpenAIMessage): string {
+async function extractOpenAIContent(msg: OpenAIMessage): Promise<string> {
     if (msg.content === null || msg.content === undefined) return '';
     if (typeof msg.content === 'string') return msg.content;
     if (Array.isArray(msg.content)) {
-        return msg.content
-            .filter(p => p.type === 'text' && p.text)
-            .map(p => p.text!)
-            .join('\n');
+        const parts: string[] = [];
+        for (const part of msg.content) {
+            if (part.type === 'text' && part.text) {
+                parts.push(part.text);
+                continue;
+            }
+
+            if (part.type === 'image_url' && part.image_url?.url) {
+                const description = await describeImage({ image_url: part.image_url });
+                parts.push(description);
+            }
+        }
+
+        return parts.join('\n');
     }
     return String(msg.content);
 }
@@ -150,10 +162,10 @@ export async function handleOpenAIChatCompletions(req: Request, res: Response): 
 
     try {
         // Step 1: OpenAI → Anthropic 格式
-        const anthropicReq = convertToAnthropicRequest(body);
+        const anthropicReq = await convertToAnthropicRequest(body);
 
         // Step 2: Anthropic → Cursor 格式（复用现有管道）
-        const cursorReq = convertToCursorRequest(anthropicReq);
+        const cursorReq = await convertToCursorRequest(anthropicReq);
 
         if (body.stream) {
             await handleOpenAIStream(res, cursorReq, body);
@@ -177,7 +189,7 @@ export async function handleOpenAIChatCompletions(req: Request, res: Response): 
 
 async function handleOpenAIStream(
     res: Response,
-    cursorReq: ReturnType<typeof convertToCursorRequest>,
+    cursorReq: CursorChatRequest,
     body: OpenAIChatRequest,
 ): Promise<void> {
     res.writeHead(200, {
@@ -325,7 +337,7 @@ async function handleOpenAIStream(
 
 async function handleOpenAINonStream(
     res: Response,
-    cursorReq: ReturnType<typeof convertToCursorRequest>,
+    cursorReq: CursorChatRequest,
     body: OpenAIChatRequest,
 ): Promise<void> {
     const fullText = await sendCursorRequestFull(cursorReq);

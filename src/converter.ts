@@ -19,6 +19,7 @@ import type {
     ParsedToolCall,
 } from './types.js';
 import { getConfig } from './config.js';
+import { describeImage } from './vision.js';
 
 // ==================== 模型映射 ====================
 
@@ -102,7 +103,7 @@ ${rules}`;
  * 策略：Cursor IDE 场景融合 + in-context learning
  * 不覆盖模型身份，而是顺应它在 IDE 内的角色，让它认为自己在执行 IDE 内部的自动化任务
  */
-export function convertToCursorRequest(req: AnthropicRequest): CursorChatRequest {
+export async function convertToCursorRequest(req: AnthropicRequest): Promise<CursorChatRequest> {
     const config = getConfig();
 
     const messages: CursorMessage[] = [];
@@ -162,7 +163,7 @@ export function convertToCursorRequest(req: AnthropicRequest): CursorChatRequest
         // 转换实际的用户/助手消息
         for (let i = 0; i < req.messages.length; i++) {
             const msg = req.messages[i];
-            let text = extractMessageText(msg);
+            let text = await extractMessageText(msg);
             if (!text) continue;
 
             if (msg.role === 'assistant') {
@@ -211,7 +212,7 @@ export function convertToCursorRequest(req: AnthropicRequest): CursorChatRequest
         // 没有工具时，将系统提示词作为第一条用户消息的前缀
         let injected = false;
         for (const msg of req.messages) {
-            let text = extractMessageText(msg);
+            let text = await extractMessageText(msg);
             if (!text) continue;
 
             if (msg.role === 'user') {
@@ -250,7 +251,7 @@ export function convertToCursorRequest(req: AnthropicRequest): CursorChatRequest
  * 从 Anthropic 消息中提取纯文本
  * 处理 string、ContentBlock[]、tool_use、tool_result 等各种格式
  */
-function extractMessageText(msg: AnthropicMessage): string {
+async function extractMessageText(msg: AnthropicMessage): Promise<string> {
     const { content } = msg;
 
     if (typeof content === 'string') return content;
@@ -282,6 +283,12 @@ function extractMessageText(msg: AnthropicMessage): string {
                     const prefix = block.is_error ? '[Tool Error]' : '[Tool Result]';
                     parts.push(`${prefix} (tool_use_id: ${block.tool_use_id}):\n${resultText}`);
                 }
+                break;
+            }
+
+            case 'image': {
+                const description = await describeImage(block.source);
+                parts.push(description);
                 break;
             }
         }
@@ -384,6 +391,35 @@ function removeTrailingCommasOutsideStrings(input: string): string {
 }
 
 /**
+ * 修复字符串内的非法转义序列（如 \a \d \w \C 等）
+ * JSON 只允许 \" \\ \/ \b \f \n \r \t \uXXXX
+ */
+function fixInvalidEscapesInStrings(input: string): string {
+    const validEscapes = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+    let out = '';
+    let inString = false;
+
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+        if (ch === '"' && !isEscapedAt(input, i)) {
+            inString = !inString;
+            out += ch;
+            continue;
+        }
+        if (inString && ch === '\\' && i + 1 < input.length) {
+            const next = input[i + 1];
+            if (!validEscapes.has(next)) {
+                // 非法转义：\a → \\a（双反斜杠保留字面量）
+                out += '\\\\';
+                continue;
+            }
+        }
+        out += ch;
+    }
+    return out;
+}
+
+/**
  * 容错 JSON 解析：分阶段修复
  */
 function tolerantParse(jsonStr: string): any {
@@ -399,6 +435,10 @@ function tolerantParse(jsonStr: string): any {
     // 第3层：在字符串外移除尾随逗号
     const fixed2 = removeTrailingCommasOutsideStrings(fixed1);
     try { return JSON.parse(fixed2); } catch {}
+
+    // 第4层：修复非法转义序列（如 \a \d \w \C 等）
+    const fixed3 = fixInvalidEscapesInStrings(fixed2);
+    try { return JSON.parse(fixed3); } catch {}
 
     throw new Error('tolerantParse: unable to parse tool JSON');
 }

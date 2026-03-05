@@ -12,6 +12,7 @@ import type {
     AnthropicResponse,
     AnthropicContentBlock,
     CursorSSEEvent,
+    CursorChatRequest,
 } from './types.js';
 import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete, SUPPORTED_MODELS, resolveModel } from './converter.js';
 import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
@@ -332,7 +333,7 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
         }
 
         // 转换为 Cursor 请求
-        const cursorReq = convertToCursorRequest(body);
+        const cursorReq = await convertToCursorRequest(body);
 
         if (body.stream) {
             await handleStream(res, cursorReq, body);
@@ -385,7 +386,7 @@ function buildRetryRequest(body: AnthropicRequest, attempt: number): AnthropicRe
 
 // ==================== 流式处理 ====================
 
-async function handleStream(res: Response, cursorReq: ReturnType<typeof convertToCursorRequest>, body: AnthropicRequest): Promise<void> {
+async function handleStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
     // 设置 SSE headers
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -445,7 +446,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
             retryCount++;
             console.log(`[Handler] 检测到身份拒绝（第${retryCount}次），自动重试...原始: ${fullResponse.substring(0, 80)}...`);
             const retryBody = buildRetryRequest(body, retryCount - 1);
-            activeCursorReq = convertToCursorRequest(retryBody);
+            activeCursorReq = await convertToCursorRequest(retryBody);
             await executeStream();
         }
         if (isRefusal(fullResponse)) {
@@ -591,7 +592,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
 
 // ==================== 非流式处理 ====================
 
-async function handleNonStream(res: Response, cursorReq: ReturnType<typeof convertToCursorRequest>, body: AnthropicRequest): Promise<void> {
+async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
     let fullText = await sendCursorRequestFull(cursorReq);
     const hasTools = (body.tools?.length ?? 0) > 0;
 
@@ -605,7 +606,7 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {
             console.log(`[Handler] 非流式：检测到身份拒绝（第${attempt + 1}次重试）...原始: ${fullText.substring(0, 80)}...`);
             const retryBody = buildRetryRequest(body, attempt);
-            const retryCursorReq = convertToCursorRequest(retryBody);
+            const retryCursorReq = await convertToCursorRequest(retryBody);
             fullText = await sendCursorRequestFull(retryCursorReq);
             if (!isRefusal(fullText)) break;
         }
@@ -626,7 +627,7 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
         const looksLikeCompletionNS = /[。！？.!?]\s*$/.test(fullText.trim());
         if (toolCalls.length === 0 && fullText.length < 200 && !looksLikeCompletionNS) {
             console.log(`[Handler] 非流式：有工具但未检测到工具调用，疑似格式不合规，重试...原始: ${fullText.substring(0, 100)}`);
-            const retryCursorReq = convertToCursorRequest(body);
+            const retryCursorReq = await convertToCursorRequest(body);
             fullText = await sendCursorRequestFull(retryCursorReq);
             ({ toolCalls, cleanText } = parseToolCalls(fullText));
             console.log(`[DEBUG] 非流式重试后 parseToolCalls: found ${toolCalls.length} tool calls`);

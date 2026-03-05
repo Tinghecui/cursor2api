@@ -20,6 +20,12 @@ export interface AnthropicMessage {
 export interface AnthropicContentBlock {
     type: 'text' | 'tool_use' | 'tool_result' | 'image';
     text?: string;
+    source?: {
+        type: 'base64' | 'url';
+        media_type?: string;
+        data?: string;
+        url?: string;
+    };
     // tool_use fields
     id?: string;
     name?: string;
@@ -95,6 +101,7 @@ export interface AppConfig {
     port: number;
     timeout: number;
     proxy?: string;
+    proxies?: string[];  // 代理池，格式 http://user:pass@ip:port
     cursorModel: string;
     fingerprint: {
         userAgent: string;
