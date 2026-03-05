@@ -8,7 +8,6 @@
 import 'dotenv/config';
 import express from 'express';
 import { getConfig } from './config.js';
-import { loadScripts } from './cursor-client.js';
 import { handleMessages, listModels, countTokens } from './handler.js';
 import { handleOpenAIChatCompletions } from './openai-handler.js';
 
@@ -72,9 +71,6 @@ app.get('/', (_req, res) => {
 });
 
 // ==================== 启动 ====================
-
-// 加载 JS 脚本
-loadScripts();
 
 app.listen(config.port, () => {
     console.log('');

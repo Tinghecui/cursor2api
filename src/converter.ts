@@ -315,6 +315,41 @@ function extractToolResultText(block: AnthropicContentBlock): string {
 
 // ==================== 响应解析 ====================
 
+function tolerantParse(jsonStr: string): any {
+    try {
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        let inString = false;
+        let escaped = false;
+        let fixed = '';
+        for (let i = 0; i < jsonStr.length; i++) {
+            const char = jsonStr[i];
+            if (char === '\\' && !escaped) {
+                escaped = true;
+                fixed += char;
+            } else if (char === '"' && !escaped) {
+                inString = !inString;
+                fixed += char;
+                escaped = false;
+            } else {
+                if (inString && (char === '\n' || char === '\r')) {
+                    fixed += char === '\n' ? '\\n' : '\\r';
+                } else if (inString && char === '\t') {
+                    fixed += '\\t';
+                } else {
+                    fixed += char;
+                }
+                escaped = false;
+            }
+        }
+
+        // Remove trailing commas
+        fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+
+        return JSON.parse(fixed);
+    }
+}
+
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
     cleanText: string;
@@ -328,7 +363,7 @@ export function parseToolCalls(responseText: string): {
     while ((match = fullBlockRegex.exec(responseText)) !== null) {
         let isToolCall = false;
         try {
-            const parsed = JSON.parse(match[1]);
+            const parsed = tolerantParse(match[1]);
             // check for tool or name
             if (parsed.tool || parsed.name) {
                 toolCalls.push({
@@ -339,6 +374,7 @@ export function parseToolCalls(responseText: string): {
             }
         } catch (e) {
             // Ignored, not a valid json tool call
+            console.error('[Converter] tolerantParse 失败:', e);
         }
 
         if (isToolCall) {

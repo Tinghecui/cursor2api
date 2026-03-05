@@ -30,8 +30,8 @@
 - **Cursor IDE 场景融合提示词注入** - 不覆盖模型身份，顺应 Cursor 内部角色设定
 - **全工具支持** - 无工具白名单限制，支持所有 MCP 工具和自定义扩展
 - **多层拒绝拦截** - 自动检测和抑制 Cursor 文档助手的拒绝行为
+- **三层身份保护** - 身份探针拦截 + 拒绝重试 + 响应清洗，确保输出永远呈现 Claude 身份
 - **上下文清洗** - 自动清理历史对话中的权限拒绝和错误记忆
-- **Node.js/TypeScript** - 无需外部进程生成 x-is-human token
 - **Chrome TLS 指纹** - 模拟真实浏览器请求头
 - **SSE 流式传输** - 实时响应
 
@@ -43,34 +43,26 @@
 npm install
 ```
 
-### 2. 获取必要文件
-
-```bash
-# 下载浏览器环境模拟脚本
-curl -o jscode/env.js https://raw.githubusercontent.com/jhhgiyv/cursorweb2api/master/jscode/env.js
-curl -o jscode/main.js https://raw.githubusercontent.com/jhhgiyv/cursorweb2api/master/jscode/main.js
-```
-
-### 3. 配置
+### 2. 配置
 
 编辑 `config.yaml`：
-- `script_url` - 从 Cursor 文档页 DevTools 网络面板获取 `c.js` 请求 URL
-- `fingerprint` - 浏览器指纹信息
+- `cursor_model` - 使用的模型（默认 `anthropic/claude-sonnet-4.6`）
+- `fingerprint.user_agent` - 浏览器 User-Agent（模拟 Chrome 请求）
 
-### 4. 启动
+### 3. 启动
 
 ```bash
 npm run dev
 ```
 
-### 5. 配合 Claude Code
+### 4. 配合 Claude Code
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3010
 claude
 ```
 
-### 6. 配合 OpenAI 兼容客户端（ChatBox、LobeChat 等）
+### 5. 配合 OpenAI 兼容客户端（ChatBox、LobeChat 等）
 
 在客户端设置中填入：
 - **API Base URL**: `http://localhost:3010/v1`
@@ -86,11 +78,10 @@ cursor2api/
 │   ├── config.ts           # 配置管理
 │   ├── types.ts            # Anthropic/Cursor 类型定义
 │   ├── openai-types.ts     # OpenAI 类型定义
-│   ├── cursor-client.ts    # Cursor API 客户端 + Token 生成
+│   ├── cursor-client.ts    # Cursor API 客户端 + Chrome TLS 指纹
 │   ├── converter.ts        # 协议转换 + 提示词注入 + 上下文清洗
-│   ├── handler.ts          # Anthropic API 处理器 + 拒绝拦截
+│   ├── handler.ts          # Anthropic API 处理器 + 身份保护 + 拒绝拦截
 │   └── openai-handler.ts   # OpenAI API 处理器
-├── jscode/                 # x-is-human token 生成脚本
 ├── config.yaml             # 配置文件
 ├── package.json
 └── tsconfig.json
@@ -142,14 +133,25 @@ AI 按此格式输出 → 我们解析并转换为标准的 Anthropic `tool_use`
 |------|------|------|
 | **L1: 上下文清洗** | `converter.ts` | 清洗历史对话中的拒绝文本和权限拒绝错误，防止模型从历史中"学会"拒绝 |
 | **L2: XML 标签分离** | `converter.ts` | 将 Claude Code 注入的 `<system-reminder>` 与用户实际请求分离，确保 IDE 场景指令紧邻用户文本 |
-| **L3: 输出拦截** | `handler.ts` | 25+ 正则模式匹配拒绝文本，在流式/非流式响应中实时拦截并替换 |
-
-### x-is-human Token
-
-Cursor 使用 `x-is-human` 请求头进行人机验证。Token 由前端 JS 生成，有效期 25 分钟。
-在 Node.js 中直接执行验证脚本，无需外部进程。
+| **L3: 输出拦截** | `handler.ts` | 50+ 正则模式匹配拒绝文本（中英文），在流式/非流式响应中实时拦截并替换 |
+| **L4: 响应清洗** | `handler.ts` | `sanitizeResponse()` 对所有输出做后处理，将 Cursor 身份引用替换为 Claude |
 
 ## 更新日志
+
+### v2.2.0 (2026-03-05) — 身份保护 + 代码精简
+
+**🛡️ 三层身份保护**
+- ✨ 扩展身份探针检测：关键词匹配（问模型/平台/系统提示词等），直接返回 Claude 模拟回复
+- ✨ 话题拒绝检测：捕获 Cursor "I'm here to help with coding and Cursor IDE questions" 等拒绝
+- ✨ `sanitizeResponse()` 响应清洗：所有输出后处理，替换 Cursor 身份引用为 Claude
+- ✨ 拒绝降级返回 Claude 身份回复（不再显示 `[System] filtered` 提示）
+- ✨ 50+ 中英文拒绝模式
+
+**🧹 代码精简**
+- 🗑️ 移除 `x-is-human` token 生成系统（Cursor 已停止校验该字段）
+- 🗑️ 移除 `jscode/` 脚本目录、`script_url` 配置、WebGL 指纹字段
+- 🗑️ 移除 `loadScripts()`、`fetchCursorScript()`、token 池管理等死代码
+- ✅ 保留 Chrome TLS 指纹 headers（user-agent、sec-ch-ua 等）
 
 ### v2.1.0 (2026-03-05) — 提示词策略重构
 

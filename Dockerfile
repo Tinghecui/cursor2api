@@ -11,7 +11,6 @@ RUN npm ci
 # 拷贝项目源代码并执行 TypeScript 编译
 COPY tsconfig.json ./
 COPY src ./src
-COPY jscode ./jscode
 RUN npm run build
 
 # ==== Stage 2: 生产运行阶段 (Runner) ====
@@ -33,9 +32,6 @@ RUN npm ci --omit=dev \
 
 # 从 builder 阶段拷贝编译后的产物
 COPY --from=builder --chown=cursor:nodejs /app/dist ./dist
-# 拷贝必要的运行时资源目录
-COPY --from=builder --chown=cursor:nodejs /app/jscode ./jscode
-
 # 明确并赋予权限，因为在脚本验证里我们需要写入 /tmp
 # 默认情况下 Alpine 的 /tmp 对所有用户都可写，这步安全地确保用户权限
 USER cursor

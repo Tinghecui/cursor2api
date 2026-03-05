@@ -95,11 +95,8 @@ export interface AppConfig {
     port: number;
     timeout: number;
     proxy?: string;
-    scriptUrl: string;
     cursorModel: string;
     fingerprint: {
-        unmaskedVendorWebGL: string;
-        unmaskedRendererWebGL: string;
         userAgent: string;
     };
 }
