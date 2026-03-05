@@ -461,8 +461,9 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
             let { toolCalls, cleanText } = parseToolCalls(fullResponse);
             console.log(`[DEBUG] parseToolCalls: found ${toolCalls.length} tool calls, cleanText=(${cleanText.substring(0, 200)})`);
 
-            // 格式不合规重试：短响应 + 有工具 + 没解析出工具调用 = 模型可能没遵循格式
-            if (toolCalls.length === 0 && fullResponse.length < 200 && retryCount < MAX_REFUSAL_RETRIES) {
+            // 格式不合规重试：短响应 + 有工具 + 没解析出工具调用 + 不像完成句子 = 模型可能没遵循格式
+            const looksLikeCompletion = /[。！？.!?]\s*$/.test(fullResponse.trim());
+            if (toolCalls.length === 0 && fullResponse.length < 200 && !looksLikeCompletion && retryCount < MAX_REFUSAL_RETRIES) {
                 retryCount++;
                 console.log(`[Handler] 有工具但未检测到工具调用，疑似格式不合规，重试(${retryCount})...原始: ${fullResponse.substring(0, 100)}`);
                 await executeStream();
@@ -622,8 +623,9 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
         let { toolCalls, cleanText } = parseToolCalls(fullText);
         console.log(`[DEBUG] 非流式 parseToolCalls: found ${toolCalls.length} tool calls, cleanText=(${cleanText.substring(0, 200)})`);
 
-        // 格式不合规重试
-        if (toolCalls.length === 0 && fullText.length < 200) {
+        // 格式不合规重试：短响应 + 不像完成句子
+        const looksLikeCompletionNS = /[。！？.!?]\s*$/.test(fullText.trim());
+        if (toolCalls.length === 0 && fullText.length < 200 && !looksLikeCompletionNS) {
             console.log(`[Handler] 非流式：有工具但未检测到工具调用，疑似格式不合规，重试...原始: ${fullText.substring(0, 100)}`);
             const retryCursorReq = convertToCursorRequest(body);
             fullText = await sendCursorRequestFull(retryCursorReq);

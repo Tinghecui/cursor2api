@@ -353,6 +353,12 @@ function tolerantParse(jsonStr: string): any {
         // Remove trailing commas
         fixed = fixed.replace(/,\s*([}\]])/g, '$1');
 
+        // Fix unescaped backslashes in strings (e.g. Windows paths like \主要工作)
+        fixed = fixed.replace(/"((?:[^"\\]|\\.)*)"/g, (_match, inner) => {
+            const fixedInner = inner.replace(/\\(?!["\\bfnrtu])/g, '\\\\');
+            return `"${fixedInner}"`;
+        });
+
         return JSON.parse(fixed);
     }
 }
