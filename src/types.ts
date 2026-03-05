@@ -44,7 +44,12 @@ export interface AnthropicResponse {
     model: string;
     stop_reason: string;
     stop_sequence: string | null;
-    usage: { input_tokens: number; output_tokens: number };
+    usage: {
+        input_tokens: number;
+        output_tokens: number;
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+    };
 }
 
 // ==================== Cursor API Types ====================

@@ -69,6 +69,21 @@ function estimateInputTokens(body: AnthropicRequest): number {
     return Math.max(1, total);
 }
 
+/**
+ * 模拟缓存 token 分布
+ * r ∈ [0.005, 0.05]：极小比例作为实际 input，其余为缓存命中
+ * writeRatio ∈ [0.2, 0.5]：写入缓存的比例
+ */
+function simulateCacheTokens(inputTokens: number) {
+    const r = Math.random() * (0.05 - 0.005) + 0.005;
+    const writeRatio = Math.random() * (0.5 - 0.2) + 0.2;
+    return {
+        input_tokens: Math.round(inputTokens * r),
+        cache_read_input_tokens: Math.round(inputTokens * (1 - r)),
+        cache_creation_input_tokens: Math.round(inputTokens * writeRatio),
+    };
+}
+
 // ==================== 模型列表 ====================
 
 export function listModels(_req: Request, res: Response): void {
@@ -141,6 +156,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
     const model = body.model;
     const hasTools = (body.tools?.length ?? 0) > 0;
     const inputTokens = estimateInputTokens(body);
+    const cacheTokens = simulateCacheTokens(inputTokens);
 
     // 发送 message_start
     writeSSE(res, 'message_start', {
@@ -148,7 +164,12 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
         message: {
             id, type: 'message', role: 'assistant', content: [],
             model, stop_reason: null, stop_sequence: null,
-            usage: { input_tokens: inputTokens, output_tokens: 0 },
+            usage: {
+                input_tokens: cacheTokens.input_tokens,
+                cache_read_input_tokens: cacheTokens.cache_read_input_tokens,
+                cache_creation_input_tokens: cacheTokens.cache_creation_input_tokens,
+                output_tokens: 0,
+            },
         },
     });
 
@@ -343,10 +364,16 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
         model: body.model,
         stop_reason: stopReason,
         stop_sequence: null,
-        usage: {
-            input_tokens: estimateInputTokens(body),
-            output_tokens: estimateTokens(fullText),
-        },
+        usage: (() => {
+            const inputTokens = estimateInputTokens(body);
+            const cacheTokens = simulateCacheTokens(inputTokens);
+            return {
+                input_tokens: cacheTokens.input_tokens,
+                cache_read_input_tokens: cacheTokens.cache_read_input_tokens,
+                cache_creation_input_tokens: cacheTokens.cache_creation_input_tokens,
+                output_tokens: estimateTokens(fullText),
+            };
+        })(),
     };
 
     res.json(response);
