@@ -80,8 +80,15 @@ const REFUSAL_PATTERNS = [
     /只能帮助.*(?:编程|代码|开发)/,
 ];
 
+function checkRefusal(text: string): { refused: boolean; pattern: string } {
+    for (const p of REFUSAL_PATTERNS) {
+        if (p.test(text)) return { refused: true, pattern: p.toString() };
+    }
+    return { refused: false, pattern: '' };
+}
+
 function isRefusal(text: string): boolean {
-    return REFUSAL_PATTERNS.some(p => p.test(text));
+    return checkRefusal(text).refused;
 }
 
 // ==================== Token 估算 ====================
@@ -430,6 +437,10 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
     try {
         await executeStream();
 
+        console.log(`[DEBUG] 原始响应 (${fullResponse.length} chars): ${fullResponse.substring(0, 500)}`);
+        const refusalCheck = checkRefusal(fullResponse);
+        console.log(`[DEBUG] isRefusal=${refusalCheck.refused}, hasTools=${hasTools}${refusalCheck.refused ? `, pattern=${refusalCheck.pattern}` : ''}`);
+
         // 统一拒绝检测+重试（不管有没有 tools）
         while (isRefusal(fullResponse) && retryCount < MAX_REFUSAL_RETRIES) {
             retryCount++;
@@ -448,8 +459,19 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
 
         if (hasTools) {
             let { toolCalls, cleanText } = parseToolCalls(fullResponse);
+            console.log(`[DEBUG] parseToolCalls: found ${toolCalls.length} tool calls, cleanText=(${cleanText.substring(0, 200)})`);
+
+            // 格式不合规重试：短响应 + 有工具 + 没解析出工具调用 = 模型可能没遵循格式
+            if (toolCalls.length === 0 && fullResponse.length < 200 && retryCount < MAX_REFUSAL_RETRIES) {
+                retryCount++;
+                console.log(`[Handler] 有工具但未检测到工具调用，疑似格式不合规，重试(${retryCount})...原始: ${fullResponse.substring(0, 100)}`);
+                await executeStream();
+                ({ toolCalls, cleanText } = parseToolCalls(fullResponse));
+                console.log(`[DEBUG] 重试后 parseToolCalls: found ${toolCalls.length} tool calls`);
+            }
 
             if (toolCalls.length > 0) {
+                console.log(`[DEBUG] toolCalls: ${JSON.stringify(toolCalls.map(tc => ({ name: tc.name, argKeys: Object.keys(tc.arguments) })))}`);
                 stopReason = 'tool_use';
 
                 if (isRefusal(cleanText)) {
@@ -483,6 +505,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
 
                 for (const tc of toolCalls) {
                     const tcId = toolId();
+                    console.log(`[DEBUG] 发送 tool_use block: id=${tcId}, name=${tc.name}, index=${blockIndex}, inputKeys=${Object.keys(tc.arguments)}`);
                     writeSSE(res, 'content_block_start', {
                         type: 'content_block_start',
                         index: blockIndex,
@@ -574,6 +597,9 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
 
     console.log(`[Handler] 原始响应 (${fullText.length} chars): ${fullText.substring(0, 300)}...`);
 
+    const refusalCheckNS = checkRefusal(fullText);
+    console.log(`[DEBUG] 非流式: isRefusal=${refusalCheckNS.refused}, hasTools=${hasTools}${refusalCheckNS.refused ? `, pattern=${refusalCheckNS.pattern}` : ''}`);
+
     // 统一拒绝检测+重试（不管有没有 tools）
     if (isRefusal(fullText)) {
         for (let attempt = 0; attempt < MAX_REFUSAL_RETRIES; attempt++) {
@@ -594,8 +620,19 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
 
     if (hasTools) {
         let { toolCalls, cleanText } = parseToolCalls(fullText);
+        console.log(`[DEBUG] 非流式 parseToolCalls: found ${toolCalls.length} tool calls, cleanText=(${cleanText.substring(0, 200)})`);
+
+        // 格式不合规重试
+        if (toolCalls.length === 0 && fullText.length < 200) {
+            console.log(`[Handler] 非流式：有工具但未检测到工具调用，疑似格式不合规，重试...原始: ${fullText.substring(0, 100)}`);
+            const retryCursorReq = convertToCursorRequest(body);
+            fullText = await sendCursorRequestFull(retryCursorReq);
+            ({ toolCalls, cleanText } = parseToolCalls(fullText));
+            console.log(`[DEBUG] 非流式重试后 parseToolCalls: found ${toolCalls.length} tool calls`);
+        }
 
         if (toolCalls.length > 0) {
+            console.log(`[DEBUG] 非流式 toolCalls: ${JSON.stringify(toolCalls.map(tc => ({ name: tc.name, argKeys: Object.keys(tc.arguments) })))}`);
             stopReason = 'tool_use';
 
             if (isRefusal(cleanText)) {

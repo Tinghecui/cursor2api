@@ -66,12 +66,14 @@ function buildToolInstructions(tools: AnthropicTool[], hasCommunicationTool: boo
 1. Output at least one \`\`\`json action ... \`\`\` block per response when performing actions.
 2. For independent tasks, you may output multiple JSON action blocks simultaneously. For dependent tasks (e.g. search → then write results), wait for each result before proceeding.
 3. When idle or asking questions, use the communication tools (attempt_completion, ask_followup_question) instead of running empty commands.
-4. Start responses directly with the JSON action block when executing tools.`
+4. Start responses directly with the JSON action block when executing tools.
+5. IMPORTANT: You MUST use the \`\`\`json action block format for ALL tool operations. Never describe what you would do in plain text — always output the actual JSON action block.`
         : `## Tool Usage Guidelines
 1. When performing actions, output \`\`\`json action ... \`\`\` blocks.
 2. For independent tasks, output multiple JSON action blocks simultaneously. For dependent tasks, wait for each result before proceeding.
 3. When simply responding or asking questions, reply with normal text without JSON blocks. Do not run meaningless commands (like "echo ready").
-4. When executing tools, start directly with the JSON action block.`;
+4. When executing tools, start directly with the JSON action block.
+5. IMPORTANT: You MUST use the \`\`\`json action block format for ALL tool operations. Never describe what you would do in plain text — always output the actual JSON action block.`;
 
     return `You are operating inside the Cursor IDE. The user has opened a project and needs your help. You have access to the following IDE automation tools to assist them.
 
