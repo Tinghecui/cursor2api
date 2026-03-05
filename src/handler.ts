@@ -25,6 +25,50 @@ function toolId(): string {
     return 'toolu_' + uuidv4().replace(/-/g, '').substring(0, 24);
 }
 
+// ==================== Token 估算 ====================
+
+/**
+ * 估算字符串的 token 数量
+ * 英文约 4 字符/token，中文/日文约 1.5 字符/token
+ */
+function estimateTokens(text: string): number {
+    if (!text) return 0;
+    // 统计非 ASCII 字符（中文、日文等）
+    const nonAsciiCount = (text.match(/[^\x00-\x7F]/g) || []).length;
+    const asciiCount = text.length - nonAsciiCount;
+    return Math.ceil(asciiCount / 4 + nonAsciiCount / 1.5);
+}
+
+/**
+ * 根据请求体估算 input_tokens
+ */
+function estimateInputTokens(body: AnthropicRequest): number {
+    let total = 0;
+
+    // system prompt
+    if (body.system) {
+        const systemText = typeof body.system === 'string'
+            ? body.system
+            : JSON.stringify(body.system);
+        total += estimateTokens(systemText);
+    }
+
+    // messages
+    for (const msg of body.messages ?? []) {
+        const text = typeof msg.content === 'string'
+            ? msg.content
+            : JSON.stringify(msg.content);
+        total += estimateTokens(text);
+    }
+
+    // tools 定义也占 token
+    if (body.tools && body.tools.length > 0) {
+        total += estimateTokens(JSON.stringify(body.tools));
+    }
+
+    return Math.max(1, total);
+}
+
 // ==================== 模型列表 ====================
 
 export function listModels(_req: Request, res: Response): void {
@@ -96,6 +140,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
     const id = msgId();
     const model = body.model;
     const hasTools = (body.tools?.length ?? 0) > 0;
+    const inputTokens = estimateInputTokens(body);
 
     // 发送 message_start
     writeSSE(res, 'message_start', {
@@ -103,7 +148,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
         message: {
             id, type: 'message', role: 'assistant', content: [],
             model, stop_reason: null, stop_sequence: null,
-            usage: { input_tokens: 100, output_tokens: 0 },
+            usage: { input_tokens: inputTokens, output_tokens: 0 },
         },
     });
 
@@ -239,7 +284,7 @@ async function handleStream(res: Response, cursorReq: ReturnType<typeof convertT
         writeSSE(res, 'message_delta', {
             type: 'message_delta',
             delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: { output_tokens: Math.ceil(fullResponse.length / 4) },
+            usage: { output_tokens: estimateTokens(fullResponse) },
         });
 
         writeSSE(res, 'message_stop', { type: 'message_stop' });
@@ -299,8 +344,8 @@ async function handleNonStream(res: Response, cursorReq: ReturnType<typeof conve
         stop_reason: stopReason,
         stop_sequence: null,
         usage: {
-            input_tokens: 100,
-            output_tokens: Math.ceil(fullText.length / 4),
+            input_tokens: estimateInputTokens(body),
+            output_tokens: estimateTokens(fullText),
         },
     };
 
