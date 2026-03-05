@@ -51,7 +51,7 @@ pm2 delete cursor2api 2>/dev/null || true
 # 5. 启动项目
 echo "[项目部署] 使用 PM2 守护进程启动服务..."
 # 设置生产环境变量
-API_KEY="${API_KEY:-}" NODE_ENV=production pm2 start dist/index.js --name "cursor2api"
+API_KEY="${API_KEY:-}" NODE_ENV=production pm2 start dist/index.js --name "cursor2api" --max-memory-restart 300M --node-args="--max-old-space-size=256"
 
 # 6. 保存并且处理自启
 echo "[项目部署] 配置 PM2 保存以便意外重启后恢复..."
