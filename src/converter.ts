@@ -415,16 +415,60 @@ function normalizeBackslashesAggressively(input: string): string {
 }
 
 /**
- * 容错 JSON 解析：分阶段修复
+ * 提取首个完整 JSON 值（对象/数组），忽略前后噪声
  */
-function tolerantParse(jsonStr: string): any {
-    const raw = jsonStr.trim();
+function extractFirstBalancedJsonValue(input: string): string | null {
+    let start = -1;
+    let inString = false;
+    const stack: string[] = [];
 
+    for (let i = 0; i < input.length; i++) {
+        const ch = input[i];
+
+        if (inString) {
+            if (ch === '"' && !isEscapedAt(input, i)) {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (ch === '{' || ch === '[') {
+            if (start < 0) start = i;
+            stack.push(ch);
+            continue;
+        }
+
+        if (ch === '}' || ch === ']') {
+            if (stack.length === 0) continue;
+
+            const open = stack[stack.length - 1];
+            const matched = (open === '{' && ch === '}') || (open === '[' && ch === ']');
+            if (!matched) continue;
+
+            stack.pop();
+            if (start >= 0 && stack.length === 0) {
+                return input.slice(start, i + 1);
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 按分层修复策略尝试解析 JSON，失败则返回 undefined
+ */
+function tryParseWithFixes(input: string): unknown {
     // 第1层：直接解析
-    try { return JSON.parse(raw); } catch {}
+    try { return JSON.parse(input); } catch {}
 
     // 第2层：转义字符串内的控制字符
-    const fixed1 = escapeControlCharsInStrings(raw);
+    const fixed1 = escapeControlCharsInStrings(input);
     try { return JSON.parse(fixed1); } catch {}
 
     // 第3层：在字符串外移除尾随逗号
@@ -439,9 +483,60 @@ function tolerantParse(jsonStr: string): any {
     const fixed4 = normalizeBackslashesAggressively(fixed3);
     try { return JSON.parse(fixed4); } catch {}
 
+    return undefined;
+}
+
+/**
+ * 容错 JSON 解析：分阶段修复
+ */
+function tolerantParse(jsonStr: string): any {
+    const raw = jsonStr.trim().replace(/^\uFEFF/, '');
+
+    const parsedRaw = tryParseWithFixes(raw);
+    if (parsedRaw !== undefined) return parsedRaw;
+
+    // 回退：提取首个完整 JSON 值再解析（容忍前后噪声）
+    const balanced = extractFirstBalancedJsonValue(raw);
+    if (balanced && balanced !== raw) {
+        const parsedBalanced = tryParseWithFixes(balanced);
+        if (parsedBalanced !== undefined) return parsedBalanced;
+    }
+
     console.error('[Converter] tolerantParse 原始 JSON 片段(前2000字符):', raw.slice(0, 2000));
 
     throw new Error('tolerantParse: unable to parse tool JSON');
+}
+
+/**
+ * 判断 i 位置的 ``` 是否是新的 opening fence（```json / ```action）
+ */
+function isOpeningFenceAt(text: string, index: number): boolean {
+    let cursor = index + 3;
+    while (cursor < text.length && (text[cursor] === ' ' || text[cursor] === '\t')) cursor++;
+
+    let word = '';
+    while (cursor < text.length && /[a-zA-Z]/.test(text[cursor])) {
+        word += text[cursor].toLowerCase();
+        cursor++;
+    }
+
+    return word === 'json' || word === 'action';
+}
+
+/**
+ * 从 fromIndex 开始扫描 closing fence，跳过后续 opening fence
+ */
+function findClosingFenceIndex(text: string, fromIndex: number): number {
+    for (let i = fromIndex; i <= text.length - 3; i++) {
+        if (text[i] === '`' && text[i + 1] === '`' && text[i + 2] === '`') {
+            if (isOpeningFenceAt(text, i)) {
+                i += 2;
+                continue;
+            }
+            return i;
+        }
+    }
+    return -1;
 }
 
 // ==================== 响应解析 ====================
@@ -453,8 +548,7 @@ type JsonActionBlock = { raw: string; json: string };
  */
 function extractJsonActionBlocks(text: string): JsonActionBlock[] {
     const blocks: JsonActionBlock[] = [];
-    const openRe = /```json(?:\s+action)?\s*/g;
-    const fallbackRe = /```json\s*(?:action)?\s*([\s\S]*?)```/g;
+    const openRe = /```json(?:\s+action)?\s*/gi;
     let m: RegExpExecArray | null;
 
     while ((m = openRe.exec(text)) !== null) {
@@ -499,8 +593,8 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         }
         if (jsonEnd < 0) continue;
 
-        // 更宽松地向后查找结束 ```，允许 JSON 结束后存在额外文本
-        const closeIndex = text.indexOf('```', jsonEnd);
+        // 向后查找 closing fence，跳过后续 opening fence（```json / ```action）
+        const closeIndex = findClosingFenceIndex(text, jsonEnd);
         if (closeIndex < 0) continue;
 
         const rawEnd = closeIndex + 3;
@@ -513,12 +607,24 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
     }
 
     if (blocks.length === 0) {
-        let fallbackMatch: RegExpExecArray | null;
-        while ((fallbackMatch = fallbackRe.exec(text)) !== null) {
+        // 回退扫描：不依赖 /[\s\S]*?/，避免超长内容下的正则性能问题
+        openRe.lastIndex = 0;
+        while ((m = openRe.exec(text)) !== null) {
+            const blockStart = m.index;
+            const jsonStart = m.index + m[0].length;
+            const closeIndex = findClosingFenceIndex(text, jsonStart);
+            if (closeIndex < 0) continue;
+
+            const rawEnd = closeIndex + 3;
+            const json = text.slice(jsonStart, closeIndex).trim();
+            if (!json) continue;
+
             blocks.push({
-                raw: fallbackMatch[0],
-                json: fallbackMatch[1],
+                raw: text.slice(blockStart, rawEnd),
+                json,
             });
+
+            openRe.lastIndex = rawEnd;
         }
     }
 
@@ -599,6 +705,7 @@ export function parseToolCalls(responseText: string): {
             }
         } catch (e) {
             console.error('[Converter] tolerantParse 失败:', e);
+            console.error('[Converter] tolerantParse 失败 block.raw(前200字符):', block.raw.slice(0, 200));
         }
     }
 
