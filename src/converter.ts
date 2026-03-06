@@ -396,11 +396,23 @@ function fixInvalidEscapesInStrings(input: string): string {
         }
         if (inString && ch === '\\' && i + 1 < input.length) {
             const next = input[i + 1];
-            if (!validEscapes.has(next)) {
-                // 非法转义：\a → \\a（双反斜杠保留字面量）
-                out += '\\\\';
+            if (validEscapes.has(next)) {
+                if (next === 'u') {
+                    const hex = input.slice(i + 2, i + 6);
+                    if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+                        out += '\\\\';
+                        continue;
+                    }
+                }
+                out += ch;
+                out += next;
+                i++;
                 continue;
             }
+
+            // 非法转义：\a → \\a（双反斜杠保留字面量）
+            out += '\\\\';
+            continue;
         }
         out += ch;
     }
@@ -494,7 +506,8 @@ function tryParseWithFixes(input: string): unknown {
  * 容错 JSON 解析：分阶段修复
  */
 function tolerantParse(jsonStr: string): any {
-    const raw = jsonStr.trim().replace(/^\uFEFF/, '');
+    const preEscaped = escapeControlCharsInStrings(jsonStr);
+    const raw = preEscaped.trim().replace(/^\uFEFF/, '');
 
     const parsedRaw = tryParseWithFixes(raw);
     if (parsedRaw !== undefined) return parsedRaw;
@@ -524,7 +537,7 @@ function isOpeningFenceAt(text: string, index: number): boolean {
         cursor++;
     }
 
-    return word === 'json' || word === 'action';
+    return word === 'json' || word === 'json5' || word === 'action';
 }
 
 /**
@@ -537,10 +550,10 @@ function findClosingFenceIndex(text: string, fromIndex: number): number {
         // 字符串感知：跳过 JSON 字符串内部的所有内容
         if (inString) {
             if (ch === '\\') { i++; continue; }
-            if (ch === '"' && !isEscapedAt(text, i)) inString = false;
+            if (ch === '"') inString = false;
             continue;
         }
-        if (ch === '"' && !isEscapedAt(text, i)) { inString = true; continue; }
+        if (ch === '"') { inString = true; continue; }
         // 找到三个反引号
         if (ch === '`' && text[i + 1] === '`' && text[i + 2] === '`') {
             if (isOpeningFenceAt(text, i)) { i += 2; continue; }
