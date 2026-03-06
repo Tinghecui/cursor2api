@@ -10,11 +10,23 @@
  * 注：x-is-human token 验证已被 Cursor 停用，直接发送空字符串即可。
  */
 
-import type { CursorChatRequest, CursorSSEEvent } from './types.js';
+import type {
+    CursorChatRequest,
+    CursorCollectedResponse,
+    CursorNativeToolCall,
+    CursorSSEEvent,
+} from './types.js';
 import { getConfig } from './config.js';
 import { ProxyAgent } from 'undici';
 
 const CURSOR_CHAT_API = 'https://cursor.com/api/chat';
+const EXPECTED_SSE_EVENT_TYPES = new Set([
+    'text-delta',
+    'tool-input-start',
+    'tool-input-delta',
+    'tool-input-available',
+    'tool-output-error',
+]);
 
 // 代理轮换
 let proxyIndex = 0;
@@ -143,6 +155,9 @@ async function sendCursorRequestInner(
 
                 try {
                     const event: CursorSSEEvent = JSON.parse(data);
+                    if (!EXPECTED_SSE_EVENT_TYPES.has(event.type)) {
+                        console.log(`[Cursor] SSE event type=${event.type} data=${JSON.stringify(data).slice(0, 300)}`);
+                    }
                     onChunk(event);
                 } catch {
                     // 非 JSON 数据，忽略
@@ -169,11 +184,98 @@ async function sendCursorRequestInner(
  * 发送非流式请求，收集完整响应
  */
 export async function sendCursorRequestFull(req: CursorChatRequest): Promise<string> {
-    let fullText = '';
+    return (await sendCursorRequestStructured(req)).text;
+}
+
+function pickStringField(obj: Record<string, unknown>, keys: string[]): string | undefined {
+    for (const key of keys) {
+        const value = obj[key];
+        if (typeof value === 'string' && value.length > 0) return value;
+    }
+    return undefined;
+}
+
+function extractToolCallId(event: CursorSSEEvent): string | undefined {
+    return pickStringField(event as Record<string, unknown>, ['toolCallId', 'callId', 'id']);
+}
+
+function extractToolName(event: CursorSSEEvent): string | undefined {
+    return pickStringField(event as Record<string, unknown>, ['toolName', 'name']);
+}
+
+function extractToolInputDelta(event: CursorSSEEvent): string {
+    return pickStringField(event as Record<string, unknown>, ['delta', 'partial_json', 'inputDelta', 'inputTextDelta', 'text']) ?? '';
+}
+
+function ensureNativeToolCall(
+    nativeToolCalls: CursorNativeToolCall[],
+    toolCallsById: Map<string, CursorNativeToolCall>,
+    id: string,
+    name?: string,
+): CursorNativeToolCall {
+    const existing = toolCallsById.get(id);
+    if (existing) {
+        if (name && (!existing.name || existing.name === 'unknown')) {
+            existing.name = name;
+        }
+        return existing;
+    }
+
+    const toolCall: CursorNativeToolCall = {
+        id,
+        name: name || 'unknown',
+        jsonBuffer: '',
+        finalized: false,
+    };
+    toolCallsById.set(id, toolCall);
+    nativeToolCalls.push(toolCall);
+    return toolCall;
+}
+
+/**
+ * 发送请求并收集结构化响应（文本 + 原生工具 SSE 事件）
+ */
+export async function sendCursorRequestStructured(req: CursorChatRequest): Promise<CursorCollectedResponse> {
+    let text = '';
+    const nativeToolCalls: CursorNativeToolCall[] = [];
+    const toolCallsById = new Map<string, CursorNativeToolCall>();
+    let lastToolCall: CursorNativeToolCall | undefined;
+
     await sendCursorRequest(req, (event) => {
-        if (event.type === 'text-delta' && event.delta) {
-            fullText += event.delta;
+        if (event.type === 'text-delta') {
+            if (event.delta) text += event.delta;
+            return;
+        }
+
+        if (event.type === 'tool-input-start') {
+            const id = extractToolCallId(event) ?? `native_tool_${nativeToolCalls.length + 1}`;
+            lastToolCall = ensureNativeToolCall(nativeToolCalls, toolCallsById, id, extractToolName(event));
+            return;
+        }
+
+        if (event.type === 'tool-input-delta') {
+            const id = extractToolCallId(event);
+            const toolCall = id
+                ? ensureNativeToolCall(nativeToolCalls, toolCallsById, id, extractToolName(event))
+                : lastToolCall;
+            if (!toolCall) return;
+
+            toolCall.jsonBuffer += extractToolInputDelta(event);
+            lastToolCall = toolCall;
+            return;
+        }
+
+        if (event.type === 'tool-input-available') {
+            const id = extractToolCallId(event);
+            const toolCall = id
+                ? ensureNativeToolCall(nativeToolCalls, toolCallsById, id, extractToolName(event))
+                : lastToolCall;
+            if (!toolCall) return;
+
+            toolCall.finalized = true;
+            lastToolCall = toolCall;
         }
     });
-    return fullText;
+
+    return { text, nativeToolCalls };
 }

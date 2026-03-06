@@ -61,20 +61,29 @@ function buildToolInstructions(tools: AnthropicTool[], hasCommunicationTool: boo
         return `### ${tool.name}\nDescription: ${tool.description || 'No description'}\nInput Schema: ${schema}`;
     }).join('\n\n');
 
+    const sharedRule6 = `6. ⚠️ HARD OUTPUT LIMIT — YOUR RESPONSE WILL BE DESTROYED IF TOO LONG ⚠️
+   This system has a 15KB output limit. If your response exceeds it, everything after 15KB is DELETED — including the closing \`\`\` fence of your tool call. This means the tool call NEVER reaches the system (silently lost), you wasted the entire response, and you MUST redo the work in smaller pieces anyway.
+   MANDATORY RULES:
+   a) Before ANY Write/Edit: count the lines of content you plan to write. If content > 150 lines, STOP and split.
+   b) Split method: Write first 150 lines with Write tool → then use Bash: cat >> file << 'EOF'\\n...next chunk...\\nEOF → repeat.
+   c) Before ANY response: estimate total output (explanation + tool JSON). If > 10KB, shorten your explanation to 1-2 sentences.
+   d) NEVER put more than 150 lines in a single "content" or "command" field. No exceptions.
+   e) When in doubt, split. A working split response is infinitely better than a truncated single response.`;
+
     // 不再使用"CRITICAL RULES"这种攻击性标题，改用 IDE 文档风格
-    const rules = hasCommunicationTool
-        ? `## Tool Usage Guidelines
-1. Output at least one \`\`\`json action ... \`\`\` block per response when performing actions.
+    const branchSpecificRules = hasCommunicationTool
+        ? `1. Output at least one \`\`\`json action ... \`\`\` block per response when performing actions.
 2. For independent tasks, you may output multiple JSON action blocks simultaneously. For dependent tasks (e.g. search → then write results), wait for each result before proceeding.
-3. When idle or asking questions, use the communication tools (attempt_completion, ask_followup_question) instead of running empty commands.
-4. Start responses directly with the JSON action block when executing tools.
-5. IMPORTANT: You MUST use the \`\`\`json action block format for ALL tool operations. Never describe what you would do in plain text — always output the actual JSON action block.`
-        : `## Tool Usage Guidelines
-1. When performing actions, output \`\`\`json action ... \`\`\` blocks.
+3. When idle or asking questions, use the communication tools (attempt_completion, ask_followup_question) instead of running empty commands.`
+        : `1. When performing actions, output \`\`\`json action ... \`\`\` blocks.
 2. For independent tasks, output multiple JSON action blocks simultaneously. For dependent tasks, wait for each result before proceeding.
-3. When simply responding or asking questions, reply with normal text without JSON blocks. Do not run meaningless commands (like "echo ready").
-4. When executing tools, start directly with the JSON action block.
-5. IMPORTANT: You MUST use the \`\`\`json action block format for ALL tool operations. Never describe what you would do in plain text — always output the actual JSON action block.`;
+3. When simply responding or asking questions, reply with normal text without JSON blocks. Do not run meaningless commands (like "echo ready").`;
+
+    const rules = `## Tool Usage Guidelines
+${branchSpecificRules}
+4. Start responses directly with the JSON action block when executing tools.
+5. IMPORTANT: You MUST use the \`\`\`json action block format for ALL tool operations. Never describe what you would do in plain text — always output the actual JSON action block.
+${sharedRule6}`;
 
     return `You have access to the following tools. When you need to perform an action, output your response in the specified format:
 
@@ -524,6 +533,10 @@ function tolerantParse(jsonStr: string): any {
     throw new Error('tolerantParse: unable to parse tool JSON');
 }
 
+export function parseToolArguments(json: string): Record<string, unknown> {
+    return tolerantParse(json);
+}
+
 /**
  * 判断 i 位置的 ``` 是否是新的 opening fence（```json / ```action）
  */
@@ -542,15 +555,19 @@ function isOpeningFenceAt(text: string, index: number): boolean {
 
 /**
  * 从 fromIndex 开始扫描 closing fence
- * 策略：行首匹配 — closing fence 永远是 \n``` 后面不跟字母数字
+ * 策略：匹配行首 ``` — 可以是 \n``` 或文本开头的 ```
+ * closing fence 后面不跟字母/数字（区别于 opening fence 如 ```python）
  * 不依赖字符串状态追踪，彻底避免 Python 三引号/heredoc 干扰
  */
 function findClosingFenceIndex(text: string, fromIndex: number): number {
-    const re = /\n```(?![a-zA-Z0-9_])/g;
-    re.lastIndex = fromIndex > 0 ? fromIndex - 1 : 0;
+    // 同时匹配：换行后的 ``` 或位于 fromIndex 起始处的 ```
+    const re = /(?:^|\n)```(?![a-zA-Z0-9_])/gm;
+    re.lastIndex = fromIndex;
     const m = re.exec(text);
     if (!m) return -1;
-    return m.index + 1; // 跳过 \n，指向第一个反引号
+    // 如果匹配到 \n```，跳过 \n 指向第一个反引号；如果是行首直接匹配则不跳过
+    const offset = m[0].startsWith('\n') ? 1 : 0;
+    return m.index + offset;
 }
 
 // ==================== 响应解析 ====================
@@ -561,7 +578,7 @@ type JsonActionBlock = { raw: string; json: string };
  * 提取 JSON action 块：直接用 closing fence 定位，把内容交给 tolerantParse 处理
  * 放弃 bracket depth 扫描——Python 三引号/heredoc 等会导致 depth 状态错误
  */
-function extractJsonActionBlocks(text: string): JsonActionBlock[] {
+function extractJsonActionBlocks(text: string): { blocks: JsonActionBlock[]; truncated: boolean; truncatedBlockStart: number } {
     const blocks: JsonActionBlock[] = [];
     const openRe = /```json(?:\s+action)?\s*/gi;
 
@@ -571,9 +588,16 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         const blockStart = m.index;
         const jsonStart = m.index + m[0].length;
 
-        // 直接从 jsonStart 找 closing fence，跳过嵌套的 opening fence
+        // 直接从 jsonStart 找 closing fence
         const closeIndex = findClosingFenceIndex(text, jsonStart);
-        if (closeIndex < 0) continue;
+        if (closeIndex < 0) {
+            // 有 opening fence 但无 closing fence：响应被截断
+            console.log(`[DEBUG] 响应截断: jsonStart=${jsonStart}, textLen=${text.length}`);
+            // 记录截断位置，以便上层从 cleanText 中移除不完整块
+            const truncatedRaw = text.slice(blockStart);
+            console.log(`[DEBUG] 截断，丢弃不完整的工具调用 (${truncatedRaw.length} chars)`);
+            return { blocks, truncated: true, truncatedBlockStart: blockStart };
+        }
 
         const rawEnd = closeIndex + 3;
         // 关键：成功找到 block 后推进 lastIndex，避免重复处理同一段文本
@@ -588,7 +612,7 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         });
     }
 
-    return blocks;
+    return { blocks, truncated: false, truncatedBlockStart: -1 };
 }
 
 /**
@@ -644,11 +668,16 @@ function extractBareToolJsonBlocks(text: string): JsonActionBlock[] {
 export function parseToolCalls(responseText: string): {
     toolCalls: ParsedToolCall[];
     cleanText: string;
+    truncated: boolean;
 } {
     const toolCalls: ParsedToolCall[] = [];
     let cleanText = responseText;
 
-    const blocks = extractJsonActionBlocks(responseText);
+    const { blocks, truncated, truncatedBlockStart } = extractJsonActionBlocks(responseText);
+
+    if (truncated) {
+        cleanText = responseText.slice(0, truncatedBlockStart);
+    }
 
     let parsedCount = 0;
     for (const block of blocks) {
@@ -671,7 +700,7 @@ export function parseToolCalls(responseText: string): {
     }
 
     // 最后兜底：若 fenced block 提取失败（没有块或全部 parse 抛错），尝试裸 JSON 工具块
-    if (toolCalls.length === 0 && (blocks.length === 0 || parsedCount === 0)) {
+    if (toolCalls.length === 0 && (blocks.length === 0 || parsedCount === 0) && !truncated) {
         const bareBlocks = extractBareToolJsonBlocks(responseText);
         for (const block of bareBlocks) {
             try {
@@ -690,7 +719,7 @@ export function parseToolCalls(responseText: string): {
         }
     }
 
-    return { toolCalls, cleanText: cleanText.trim() };
+    return { toolCalls, cleanText: cleanText.trim(), truncated };
 }
 
 /**
@@ -698,17 +727,6 @@ export function parseToolCalls(responseText: string): {
  */
 export function hasToolCalls(text: string): boolean {
     return text.includes('```json');
-}
-
-/**
- * 检查文本中的工具调用是否完整（有结束标签）
- */
-export function isToolCallComplete(text: string): boolean {
-    const openCount = (text.match(/```json\s+action/g) || []).length;
-    // Count closing ``` that are NOT part of opening ```json action
-    const allBackticks = (text.match(/```/g) || []).length;
-    const closeCount = allBackticks - openCount;
-    return openCount > 0 && closeCount >= openCount;
 }
 
 // ==================== 工具函数 ====================

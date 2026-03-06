@@ -11,12 +11,11 @@ import type {
     AnthropicRequest,
     AnthropicResponse,
     AnthropicContentBlock,
-    CursorSSEEvent,
+    CursorCollectedResponse,
     CursorChatRequest,
 } from './types.js';
-import { convertToCursorRequest, parseToolCalls, hasToolCalls, isToolCallComplete, SUPPORTED_MODELS, resolveModel } from './converter.js';
-import { sendCursorRequest, sendCursorRequestFull } from './cursor-client.js';
-import { getConfig } from './config.js';
+import { convertToCursorRequest, parseToolCalls, parseToolArguments, SUPPORTED_MODELS, resolveModel } from './converter.js';
+import { sendCursorRequestStructured } from './cursor-client.js';
 
 function msgId(): string {
     return 'msg_' + uuidv4().replace(/-/g, '').substring(0, 24);
@@ -24,6 +23,13 @@ function msgId(): string {
 
 function toolId(): string {
     return 'toolu_' + uuidv4().replace(/-/g, '').substring(0, 24);
+}
+
+function parseNativeToolCalls(response: CursorCollectedResponse): { name: string; arguments: Record<string, unknown> }[] {
+    return response.nativeToolCalls.map(toolCall => ({
+        name: toolCall.name,
+        arguments: parseToolArguments(toolCall.jsonBuffer),
+    }));
 }
 
 // ==================== 拒绝模式识别 ====================
@@ -383,6 +389,31 @@ function buildRetryRequest(body: AnthropicRequest, attempt: number): AnthropicRe
     return { ...body, messages: newMessages };
 }
 
+// ==================== 续写请求构建 ====================
+
+function buildContinuationRequest(
+    originalReq: CursorChatRequest,
+    truncatedResponse: string
+): CursorChatRequest {
+    return {
+        ...originalReq,
+        id: msgId(),
+        messages: [
+            ...originalReq.messages,
+            {
+                parts: [{ type: 'text', text: truncatedResponse }],
+                id: msgId(),
+                role: 'assistant',
+            },
+            {
+                parts: [{ type: 'text', text: 'Please continue exactly where you left off. Do not repeat anything, just continue the output from where it was cut off.' }],
+                id: msgId(),
+                role: 'user',
+            },
+        ],
+    };
+}
+
 // ==================== 流式处理 ====================
 
 async function handleStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
@@ -415,8 +446,8 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         },
     });
 
+    let collectedResponse: CursorCollectedResponse = { text: '', nativeToolCalls: [] };
     let fullResponse = '';
-    let sentText = '';
     let blockIndex = 0;
     let textBlockStarted = false;
 
@@ -424,21 +455,13 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
     let activeCursorReq = cursorReq;
     let retryCount = 0;
 
-    const executeStream = async () => {
-        fullResponse = '';
-        await sendCursorRequest(activeCursorReq, (event: CursorSSEEvent) => {
-            if (event.type !== 'text-delta' || !event.delta) return;
-            fullResponse += event.delta;
-            // 有工具时始终缓冲，无工具时也缓冲（用于拒绝检测）
-        });
+    const executeStream = async (overrideReq?: CursorChatRequest) => {
+        collectedResponse = await sendCursorRequestStructured(overrideReq ?? activeCursorReq);
+        fullResponse = collectedResponse.text;
     };
 
     try {
         await executeStream();
-
-        console.log(`[DEBUG] 原始响应 (${fullResponse.length} chars): ${fullResponse.substring(0, 500)}`);
-        const refusalCheck = checkRefusal(fullResponse);
-        console.log(`[DEBUG] isRefusal=${refusalCheck.refused}, hasTools=${hasTools}${refusalCheck.refused ? `, pattern=${refusalCheck.pattern}` : ''}`);
 
         // 统一拒绝检测+重试（不管有没有 tools）
         while (isRefusal(fullResponse) && retryCount < MAX_REFUSAL_RETRIES) {
@@ -450,6 +473,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         }
         if (isRefusal(fullResponse)) {
             console.log(`[Handler] 重试${MAX_REFUSAL_RETRIES}次后仍被拒绝，返回降级回复`);
+            collectedResponse = { text: CLAUDE_IDENTITY_RESPONSE, nativeToolCalls: [] };
             fullResponse = CLAUDE_IDENTITY_RESPONSE;
         }
 
@@ -457,21 +481,43 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
         let stopReason = 'end_turn';
 
         if (hasTools) {
-            let { toolCalls, cleanText } = parseToolCalls(fullResponse);
-            console.log(`[DEBUG] parseToolCalls: found ${toolCalls.length} tool calls, cleanText=(${cleanText.substring(0, 200)})`);
+            let toolCalls: { name: string; arguments: Record<string, unknown> }[] = [];
+            let cleanText = fullResponse;
 
-            // 格式不合规重试：短响应 + 有工具 + 没解析出工具调用 + 不像完成句子 = 模型可能没遵循格式
-            const looksLikeCompletion = /[。！？.!?]\s*$/.test(fullResponse.trim());
-            if (toolCalls.length === 0 && fullResponse.length < 200 && !looksLikeCompletion && retryCount < MAX_REFUSAL_RETRIES) {
-                retryCount++;
-                console.log(`[Handler] 有工具但未检测到工具调用，疑似格式不合规，重试(${retryCount})...原始: ${fullResponse.substring(0, 100)}`);
-                await executeStream();
-                ({ toolCalls, cleanText } = parseToolCalls(fullResponse));
-                console.log(`[DEBUG] 重试后 parseToolCalls: found ${toolCalls.length} tool calls`);
+            if (collectedResponse.nativeToolCalls.length > 0) {
+                toolCalls = parseNativeToolCalls(collectedResponse);
+            } else {
+                let truncated;
+                ({ toolCalls, cleanText, truncated } = parseToolCalls(fullResponse));
+
+                // 截断续写：响应被 Cursor API 截断，追加续写请求拼接完整响应
+                const MAX_CONTINUATIONS = 3;
+                let continuationCount = 0;
+                while (truncated && toolCalls.length === 0 && continuationCount < MAX_CONTINUATIONS) {
+                    continuationCount++;
+                    console.log(`[Handler] 响应截断，发起续写请求 (${continuationCount}/${MAX_CONTINUATIONS})...`);
+                    const contReq = buildContinuationRequest(activeCursorReq, fullResponse);
+                    const prev = fullResponse;
+                    await executeStream(contReq);
+                    fullResponse = prev + collectedResponse.text;
+                    ({ toolCalls, cleanText, truncated } = parseToolCalls(fullResponse));
+                }
+                if (truncated && toolCalls.length === 0) {
+                    console.log(`[Handler] 续写 ${MAX_CONTINUATIONS} 次后仍未得到完整响应，降级为纯文本`);
+                }
+
+                // 格式不合规重试：短响应 + 有工具 + 没解析出工具调用 + 不像完成句子 = 模型可能没遵循格式
+                const looksLikeCompletion = /[。！？.!?]\s*$/.test(fullResponse.trim());
+                if (toolCalls.length === 0 && !truncated && fullResponse.length < 200 && !looksLikeCompletion && retryCount < MAX_REFUSAL_RETRIES) {
+                    retryCount++;
+                    console.log(`[Handler] 有工具但未检测到工具调用，疑似格式不合规，重试(${retryCount})...原始: ${fullResponse.substring(0, 100)}`);
+                    await executeStream();
+                    fullResponse = collectedResponse.text;
+                    ({ toolCalls, cleanText } = parseToolCalls(fullResponse));
+                }
             }
 
             if (toolCalls.length > 0) {
-                console.log(`[DEBUG] toolCalls: ${JSON.stringify(toolCalls.map(tc => ({ name: tc.name, argKeys: Object.keys(tc.arguments) })))}`);
                 stopReason = 'tool_use';
 
                 if (isRefusal(cleanText)) {
@@ -479,9 +525,9 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     cleanText = '';
                 }
 
-                const unsentCleanText = cleanText.substring(sentText.length).trim();
+                const cleanTextToSend = cleanText.trim();
 
-                if (unsentCleanText) {
+                if (cleanTextToSend) {
                     if (!textBlockStarted) {
                         writeSSE(res, 'content_block_start', {
                             type: 'content_block_start', index: blockIndex,
@@ -491,7 +537,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     }
                     writeSSE(res, 'content_block_delta', {
                         type: 'content_block_delta', index: blockIndex,
-                        delta: { type: 'text_delta', text: (sentText && !sentText.endsWith('\n') ? '\n' : '') + unsentCleanText }
+                        delta: { type: 'text_delta', text: cleanTextToSend }
                     });
                 }
 
@@ -505,7 +551,6 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
                 for (const tc of toolCalls) {
                     const tcId = toolId();
-                    console.log(`[DEBUG] 发送 tool_use block: id=${tcId}, name=${tc.name}, index=${blockIndex}, inputKeys=${Object.keys(tc.arguments)}`);
                     writeSSE(res, 'content_block_start', {
                         type: 'content_block_start',
                         index: blockIndex,
@@ -526,10 +571,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                 }
             } else {
                 // 无工具调用，作为纯文本发送（拒绝已在上方统一处理）
-                const textToSend = fullResponse;
-
-                const unsentText = textToSend.substring(sentText.length);
-                if (unsentText) {
+                if (fullResponse) {
                     if (!textBlockStarted) {
                         writeSSE(res, 'content_block_start', {
                             type: 'content_block_start', index: blockIndex,
@@ -539,7 +581,7 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
                     }
                     writeSSE(res, 'content_block_delta', {
                         type: 'content_block_delta', index: blockIndex,
-                        delta: { type: 'text_delta', text: unsentText },
+                        delta: { type: 'text_delta', text: fullResponse },
                     });
                 }
             }
@@ -592,13 +634,11 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 // ==================== 非流式处理 ====================
 
 async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body: AnthropicRequest): Promise<void> {
-    let fullText = await sendCursorRequestFull(cursorReq);
+    let collectedResponse = await sendCursorRequestStructured(cursorReq);
+    let fullText = collectedResponse.text;
     const hasTools = (body.tools?.length ?? 0) > 0;
 
     console.log(`[Handler] 原始响应 (${fullText.length} chars): ${fullText.substring(0, 300)}...`);
-
-    const refusalCheckNS = checkRefusal(fullText);
-    console.log(`[DEBUG] 非流式: isRefusal=${refusalCheckNS.refused}, hasTools=${hasTools}${refusalCheckNS.refused ? `, pattern=${refusalCheckNS.pattern}` : ''}`);
 
     // 统一拒绝检测+重试（不管有没有 tools）
     if (isRefusal(fullText)) {
@@ -606,11 +646,13 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
             console.log(`[Handler] 非流式：检测到身份拒绝（第${attempt + 1}次重试）...原始: ${fullText.substring(0, 80)}...`);
             const retryBody = buildRetryRequest(body, attempt);
             const retryCursorReq = await convertToCursorRequest(retryBody);
-            fullText = await sendCursorRequestFull(retryCursorReq);
+            collectedResponse = await sendCursorRequestStructured(retryCursorReq);
+            fullText = collectedResponse.text;
             if (!isRefusal(fullText)) break;
         }
         if (isRefusal(fullText)) {
             console.log(`[Handler] 非流式：重试${MAX_REFUSAL_RETRIES}次后仍被拒绝，返回降级回复`);
+            collectedResponse = { text: CLAUDE_IDENTITY_RESPONSE, nativeToolCalls: [] };
             fullText = CLAUDE_IDENTITY_RESPONSE;
         }
     }
@@ -619,21 +661,43 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
     let stopReason = 'end_turn';
 
     if (hasTools) {
-        let { toolCalls, cleanText } = parseToolCalls(fullText);
-        console.log(`[DEBUG] 非流式 parseToolCalls: found ${toolCalls.length} tool calls, cleanText=(${cleanText.substring(0, 200)})`);
+        let toolCalls: { name: string; arguments: Record<string, unknown> }[] = [];
+        let cleanText = fullText;
 
-        // 格式不合规重试：短响应 + 不像完成句子
-        const looksLikeCompletionNS = /[。！？.!?]\s*$/.test(fullText.trim());
-        if (toolCalls.length === 0 && fullText.length < 200 && !looksLikeCompletionNS) {
-            console.log(`[Handler] 非流式：有工具但未检测到工具调用，疑似格式不合规，重试...原始: ${fullText.substring(0, 100)}`);
-            const retryCursorReq = await convertToCursorRequest(body);
-            fullText = await sendCursorRequestFull(retryCursorReq);
-            ({ toolCalls, cleanText } = parseToolCalls(fullText));
-            console.log(`[DEBUG] 非流式重试后 parseToolCalls: found ${toolCalls.length} tool calls`);
+        if (collectedResponse.nativeToolCalls.length > 0) {
+            toolCalls = parseNativeToolCalls(collectedResponse);
+        } else {
+            let truncated;
+            ({ toolCalls, cleanText, truncated } = parseToolCalls(fullText));
+
+            // 截断续写
+            const MAX_CONTINUATIONS_NS = 3;
+            let continuationCountNS = 0;
+            while (truncated && toolCalls.length === 0 && continuationCountNS < MAX_CONTINUATIONS_NS) {
+                continuationCountNS++;
+                console.log(`[Handler] 非流式：响应截断，发起续写请求 (${continuationCountNS}/${MAX_CONTINUATIONS_NS})...`);
+                const contReq = buildContinuationRequest(cursorReq, fullText);
+                const prev = fullText;
+                const continuationResponse = await sendCursorRequestStructured(contReq);
+                fullText = prev + continuationResponse.text;
+                ({ toolCalls, cleanText, truncated } = parseToolCalls(fullText));
+            }
+            if (truncated && toolCalls.length === 0) {
+                console.log(`[Handler] 非流式：续写 ${MAX_CONTINUATIONS_NS} 次后仍未得到完整响应，降级为纯文本`);
+            }
+
+            // 格式不合规重试：短响应 + 不像完成句子
+            const looksLikeCompletionNS = /[。！？.!?]\s*$/.test(fullText.trim());
+            if (toolCalls.length === 0 && !truncated && fullText.length < 200 && !looksLikeCompletionNS) {
+                console.log(`[Handler] 非流式：有工具但未检测到工具调用，疑似格式不合规，重试...原始: ${fullText.substring(0, 100)}`);
+                const retryCursorReq = await convertToCursorRequest(body);
+                collectedResponse = await sendCursorRequestStructured(retryCursorReq);
+                fullText = collectedResponse.text;
+                ({ toolCalls, cleanText } = parseToolCalls(fullText));
+            }
         }
 
         if (toolCalls.length > 0) {
-            console.log(`[DEBUG] 非流式 toolCalls: ${JSON.stringify(toolCalls.map(tc => ({ name: tc.name, argKeys: Object.keys(tc.arguments) })))}`);
             stopReason = 'tool_use';
 
             if (isRefusal(cleanText)) {

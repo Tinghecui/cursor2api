@@ -86,8 +86,29 @@ export interface CursorPart {
 }
 
 export interface CursorSSEEvent {
-    type: string;
+    type: 'text-delta' | 'tool-input-start' | 'tool-input-delta' | 'tool-input-available' | 'tool-output-error' | (string & {});
     delta?: string;
+    partial_json?: string;
+    inputDelta?: string;
+    text?: string;
+    toolCallId?: string;
+    callId?: string;
+    id?: string;
+    toolName?: string;
+    name?: string;
+    [key: string]: unknown;
+}
+
+export interface CursorNativeToolCall {
+    id: string;
+    name: string;
+    jsonBuffer: string;
+    finalized: boolean;
+}
+
+export interface CursorCollectedResponse {
+    text: string;
+    nativeToolCalls: CursorNativeToolCall[];
 }
 
 // ==================== Internal Types ====================
