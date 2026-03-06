@@ -548,50 +548,12 @@ function findClosingFenceIndex(text: string, fromIndex: number): number {
 type JsonActionBlock = { raw: string; json: string };
 
 /**
- * 用括号深度扫描提取 JSON action 块，避免被字符串内的反引号截断
+ * 提取 JSON action 块：直接用 closing fence 定位，把内容交给 tolerantParse 处理
+ * 放弃 bracket depth 扫描——Python 三引号/heredoc 等会导致 depth 状态错误
  */
 function extractJsonActionBlocks(text: string): JsonActionBlock[] {
     const blocks: JsonActionBlock[] = [];
     const openRe = /```json(?:\s+action)?\s*/gi;
-
-    const scanJsonEnd = (start: number): number => {
-        let inString = false;
-        let depth = 0;
-        let seenRoot = false;
-
-        for (let i = start; i < text.length; i++) {
-            const ch = text[i];
-
-            if (inString) {
-                if (ch === '\\') {
-                    i++;
-                    continue;
-                }
-                if (ch === '"') {
-                    inString = false;
-                }
-                continue;
-            }
-
-            if (ch === '"') {
-                inString = true;
-                continue;
-            }
-
-            if (ch === '{' || ch === '[') {
-                depth++;
-                seenRoot = true;
-            } else if (ch === '}' || ch === ']') {
-                depth--;
-                if (seenRoot && depth === 0) {
-                    return i + 1;
-                }
-                if (depth < 0) break;
-            }
-        }
-
-        return -1;
-    };
 
     let m: RegExpExecArray | null;
 
@@ -599,17 +561,12 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         const blockStart = m.index;
         const jsonStart = m.index + m[0].length;
 
-        const jsonEnd = scanJsonEnd(jsonStart);
-        const closeSearchStart = jsonEnd >= 0 ? jsonEnd : jsonStart;
-
-        // 向后查找 closing fence，跳过后续 opening fence（```json / ```action）
-        const closeIndex = findClosingFenceIndex(text, closeSearchStart);
+        // 直接从 jsonStart 找 closing fence，跳过嵌套的 opening fence
+        const closeIndex = findClosingFenceIndex(text, jsonStart);
         if (closeIndex < 0) continue;
 
         const rawEnd = closeIndex + 3;
-        const json = jsonEnd >= 0
-            ? text.slice(jsonStart, jsonEnd)
-            : text.slice(jsonStart, closeIndex).trim();
+        const json = text.slice(jsonStart, closeIndex).trim();
         if (!json) continue;
 
         blocks.push({
@@ -618,33 +575,6 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         });
 
         openRe.lastIndex = rawEnd;
-    }
-
-    if (blocks.length === 0) {
-        // 回退扫描：不依赖 /[\s\S]*?/，避免超长内容下的正则性能问题
-        openRe.lastIndex = 0;
-        while ((m = openRe.exec(text)) !== null) {
-            const blockStart = m.index;
-            const jsonStart = m.index + m[0].length;
-
-            const jsonEnd = scanJsonEnd(jsonStart);
-            const closeSearchStart = jsonEnd >= 0 ? jsonEnd : jsonStart;
-            const closeIndex = findClosingFenceIndex(text, closeSearchStart);
-            if (closeIndex < 0) continue;
-
-            const rawEnd = closeIndex + 3;
-            const json = jsonEnd >= 0
-                ? text.slice(jsonStart, jsonEnd)
-                : text.slice(jsonStart, closeIndex).trim();
-            if (!json) continue;
-
-            blocks.push({
-                raw: text.slice(blockStart, rawEnd),
-                json,
-            });
-
-            openRe.lastIndex = rawEnd;
-        }
     }
 
     return blocks;
