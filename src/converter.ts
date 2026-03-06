@@ -426,7 +426,11 @@ function extractFirstBalancedJsonValue(input: string): string | null {
         const ch = input[i];
 
         if (inString) {
-            if (ch === '"' && !isEscapedAt(input, i)) {
+            if (ch === '\\') {
+                i++;
+                continue;
+            }
+            if (ch === '"') {
                 inString = false;
             }
             continue;
@@ -549,18 +553,13 @@ type JsonActionBlock = { raw: string; json: string };
 function extractJsonActionBlocks(text: string): JsonActionBlock[] {
     const blocks: JsonActionBlock[] = [];
     const openRe = /```json(?:\s+action)?\s*/gi;
-    let m: RegExpExecArray | null;
 
-    while ((m = openRe.exec(text)) !== null) {
-        const blockStart = m.index;
-        const jsonStart = m.index + m[0].length;
-
+    const scanJsonEnd = (start: number): number => {
         let inString = false;
         let depth = 0;
         let seenRoot = false;
-        let jsonEnd = -1;
 
-        for (let i = jsonStart; i < text.length; i++) {
+        for (let i = start; i < text.length; i++) {
             const ch = text[i];
 
             if (inString) {
@@ -585,22 +584,37 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
             } else if (ch === '}' || ch === ']') {
                 depth--;
                 if (seenRoot && depth === 0) {
-                    jsonEnd = i + 1;
-                    break;
+                    return i + 1;
                 }
                 if (depth < 0) break;
             }
         }
-        if (jsonEnd < 0) continue;
+
+        return -1;
+    };
+
+    let m: RegExpExecArray | null;
+
+    while ((m = openRe.exec(text)) !== null) {
+        const blockStart = m.index;
+        const jsonStart = m.index + m[0].length;
+
+        const jsonEnd = scanJsonEnd(jsonStart);
+        const closeSearchStart = jsonEnd >= 0 ? jsonEnd : jsonStart;
 
         // 向后查找 closing fence，跳过后续 opening fence（```json / ```action）
-        const closeIndex = findClosingFenceIndex(text, jsonEnd);
+        const closeIndex = findClosingFenceIndex(text, closeSearchStart);
         if (closeIndex < 0) continue;
 
         const rawEnd = closeIndex + 3;
+        const json = jsonEnd >= 0
+            ? text.slice(jsonStart, jsonEnd)
+            : text.slice(jsonStart, closeIndex).trim();
+        if (!json) continue;
+
         blocks.push({
             raw: text.slice(blockStart, rawEnd),
-            json: text.slice(jsonStart, jsonEnd),
+            json,
         });
 
         openRe.lastIndex = rawEnd;
@@ -612,11 +626,16 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         while ((m = openRe.exec(text)) !== null) {
             const blockStart = m.index;
             const jsonStart = m.index + m[0].length;
-            const closeIndex = findClosingFenceIndex(text, jsonStart);
+
+            const jsonEnd = scanJsonEnd(jsonStart);
+            const closeSearchStart = jsonEnd >= 0 ? jsonEnd : jsonStart;
+            const closeIndex = findClosingFenceIndex(text, closeSearchStart);
             if (closeIndex < 0) continue;
 
             const rawEnd = closeIndex + 3;
-            const json = text.slice(jsonStart, closeIndex).trim();
+            const json = jsonEnd >= 0
+                ? text.slice(jsonStart, jsonEnd)
+                : text.slice(jsonStart, closeIndex).trim();
             if (!json) continue;
 
             blocks.push({
