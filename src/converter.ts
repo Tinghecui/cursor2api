@@ -76,9 +76,7 @@ function buildToolInstructions(tools: AnthropicTool[], hasCommunicationTool: boo
 4. When executing tools, start directly with the JSON action block.
 5. IMPORTANT: You MUST use the \`\`\`json action block format for ALL tool operations. Never describe what you would do in plain text — always output the actual JSON action block.`;
 
-    return `You are operating inside the Cursor IDE. The user has opened a project and needs your help. You have access to the following IDE automation tools to assist them.
-
-To use a tool, output your action in this exact markdown format:
+    return `You have access to the following tools. When you need to perform an action, output your response in the specified format:
 
 \`\`\`json action
 {
@@ -145,17 +143,7 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
             role: 'user',
         });
         messages.push({
-            parts: [{ type: 'text', text: `Got it. I'll use the IDE tools to help. Here is an example of how I'll format my actions:\n\n\`\`\`json action\n{\n  "tool": "${exampleTool.name}",\n  "parameters": ${JSON.stringify(exampleParams, null, 2).split('\n').join('\n  ')}\n}\n\`\`\`\n\nReady for the first task.` }],
-            id: shortId(),
-            role: 'assistant',
-        });
-        messages.push({
-            parts: [{ type: 'text', text: 'Great. Here is the user\'s first request:' }],
-            id: shortId(),
-            role: 'user',
-        });
-        messages.push({
-            parts: [{ type: 'text', text: 'Standing by. I\'ll output the JSON action blocks as needed.' }],
+            parts: [{ type: 'text', text: `Understood, I will format my actions accordingly.\n\n\`\`\`json action\n{\n  "tool": "${exampleTool.name}",\n  "parameters": ${JSON.stringify(exampleParams, null, 2).split('\n').join('\n  ')}\n}\n\`\`\`\n\nReady.` }],
             id: shortId(),
             role: 'assistant',
         });
@@ -193,7 +181,7 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
                 actualQuery = actualQuery.trim();
 
                 // 用 IDE 场景包装用户请求，不使用攻击性语言
-                let wrapped = `The user is working in the Cursor IDE and needs help with the following:\n\n${actualQuery}\n\nPlease use the available IDE tools to accomplish this. Output the JSON action blocks directly.`;
+                let wrapped = `Please help with the following:\n\n${actualQuery}\n\nPlease use the available IDE tools to accomplish this. Output the JSON action blocks directly.`;
 
                 if (tagsPrefix) {
                     text = `${tagsPrefix}\n${wrapped}`;
@@ -420,6 +408,13 @@ function fixInvalidEscapesInStrings(input: string): string {
 }
 
 /**
+ * 激进反斜杠归一化：将不跟随合法 JSON 转义字符的单反斜杠替换为双反斜杠
+ */
+function normalizeBackslashesAggressively(input: string): string {
+    return input.replace(/\\(?!["\\\/bfnrtu])/g, '\\\\');
+}
+
+/**
  * 容错 JSON 解析：分阶段修复
  */
 function tolerantParse(jsonStr: string): any {
@@ -440,6 +435,12 @@ function tolerantParse(jsonStr: string): any {
     const fixed3 = fixInvalidEscapesInStrings(fixed2);
     try { return JSON.parse(fixed3); } catch {}
 
+    // 第5层：激进反斜杠归一化
+    const fixed4 = normalizeBackslashesAggressively(fixed3);
+    try { return JSON.parse(fixed4); } catch {}
+
+    console.error('[Converter] tolerantParse 原始 JSON 片段(前500字符):', raw.slice(0, 500));
+
     throw new Error('tolerantParse: unable to parse tool JSON');
 }
 
@@ -453,6 +454,7 @@ type JsonActionBlock = { raw: string; json: string };
 function extractJsonActionBlocks(text: string): JsonActionBlock[] {
     const blocks: JsonActionBlock[] = [];
     const openRe = /```json(?:\s+action)?\s*/g;
+    const fallbackRe = /```json\s*(?:action)?\s*([\s\S]*?)```/g;
     let m: RegExpExecArray | null;
 
     while ((m = openRe.exec(text)) !== null) {
@@ -482,18 +484,27 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         }
         if (jsonEnd < 0) continue;
 
-        // 查找结束的 ```
-        const tail = text.slice(jsonEnd);
-        const close = tail.match(/^\s*```/);
-        if (!close) continue;
+        // 更宽松地向后查找结束 ```，允许 JSON 结束后存在额外文本
+        const closeIndex = text.indexOf('```', jsonEnd);
+        if (closeIndex < 0) continue;
 
-        const rawEnd = jsonEnd + close[0].length;
+        const rawEnd = closeIndex + 3;
         blocks.push({
             raw: text.slice(blockStart, rawEnd),
             json: text.slice(jsonStart, jsonEnd),
         });
 
         openRe.lastIndex = rawEnd;
+    }
+
+    if (blocks.length === 0) {
+        let fallbackMatch: RegExpExecArray | null;
+        while ((fallbackMatch = fallbackRe.exec(text)) !== null) {
+            blocks.push({
+                raw: fallbackMatch[0],
+                json: fallbackMatch[1],
+            });
+        }
     }
 
     return blocks;

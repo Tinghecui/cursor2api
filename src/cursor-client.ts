@@ -4,7 +4,7 @@
  * 职责：
  * 1. 发送请求到 https://cursor.com/api/chat（带 Chrome TLS 指纹模拟 headers）
  * 2. 流式解析 SSE 响应
- * 3. 自动重试（最多 3 次，429 指数退避 2s→6s→18s）
+ * 3. 自动重试（普通错误最多 3 次；429 使用更长指数退避）
  * 4. 代理池轮换（round-robin，降低 IP 限流）
  *
  * 注：x-is-human token 验证已被 Cursor 停用，直接发送空字符串即可。
@@ -61,17 +61,28 @@ export async function sendCursorRequest(
     req: CursorChatRequest,
     onChunk: (event: CursorSSEEvent) => void,
 ): Promise<void> {
-    const maxRetries = 3;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const normalMaxAttempts = 3;
+    const max429Attempts = 5;
+    for (let attempt = 1; attempt <= max429Attempts; attempt++) {
         try {
             await sendCursorRequestInner(req, onChunk);
             return;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            console.error(`[Cursor] 请求失败 (${attempt}/${maxRetries}): ${msg}`);
-            if (attempt < maxRetries) {
-                const is429 = msg.includes('429') || msg.includes('Rate limit');
-                const delay = is429 ? 2000 * Math.pow(3, attempt - 1) : 2000;
+            const is429 = msg.includes('429') || msg.includes('Rate limit');
+            const maxAttempts = is429 ? max429Attempts : normalMaxAttempts;
+            console.error(`[Cursor] 请求失败 (${attempt}/${maxAttempts}): ${msg}`);
+            if (attempt < maxAttempts) {
+                if (is429) {
+                    const baseDelay = 10000 * Math.pow(3, attempt - 1);
+                    const delay = baseDelay * (0.5 + Math.random() * 0.5);
+                    const maxRetries = maxAttempts - 1;
+                    console.log(`[Cursor] 429 限流，等待 ${delay}ms 后重试 (${attempt}/${maxRetries})...`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                }
+
+                const delay = 2000;
                 console.log(`[Cursor] ${delay / 1000}s 后重试...`);
                 await new Promise(r => setTimeout(r, delay));
             } else {
