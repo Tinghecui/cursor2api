@@ -439,7 +439,7 @@ function tolerantParse(jsonStr: string): any {
     const fixed4 = normalizeBackslashesAggressively(fixed3);
     try { return JSON.parse(fixed4); } catch {}
 
-    console.error('[Converter] tolerantParse 原始 JSON 片段(前500字符):', raw.slice(0, 500));
+    console.error('[Converter] tolerantParse 原始 JSON 片段(前2000字符):', raw.slice(0, 2000));
 
     throw new Error('tolerantParse: unable to parse tool JSON');
 }
@@ -468,8 +468,22 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
 
         for (let i = jsonStart; i < text.length; i++) {
             const ch = text[i];
-            if (ch === '"' && !isEscapedAt(text, i)) inString = !inString;
-            if (inString) continue;
+
+            if (inString) {
+                if (ch === '\\') {
+                    i++;
+                    continue;
+                }
+                if (ch === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (ch === '"') {
+                inString = true;
+                continue;
+            }
 
             if (ch === '{' || ch === '[') {
                 depth++;
@@ -480,6 +494,7 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
                     jsonEnd = i + 1;
                     break;
                 }
+                if (depth < 0) break;
             }
         }
         if (jsonEnd < 0) continue;
