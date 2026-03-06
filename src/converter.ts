@@ -528,15 +528,22 @@ function isOpeningFenceAt(text: string, index: number): boolean {
 }
 
 /**
- * 从 fromIndex 开始扫描 closing fence，跳过后续 opening fence
+ * 从 fromIndex 开始扫描 closing fence，跳过字符串内的反引号和 opening fence
  */
 function findClosingFenceIndex(text: string, fromIndex: number): number {
-    for (let i = fromIndex; i <= text.length - 3; i++) {
-        if (text[i] === '`' && text[i + 1] === '`' && text[i + 2] === '`') {
-            if (isOpeningFenceAt(text, i)) {
-                i += 2;
-                continue;
-            }
+    let inString = false;
+    for (let i = fromIndex; i < text.length; i++) {
+        const ch = text[i];
+        // 字符串感知：跳过 JSON 字符串内部的所有内容
+        if (inString) {
+            if (ch === '\\') { i++; continue; }
+            if (ch === '"' && !isEscapedAt(text, i)) inString = false;
+            continue;
+        }
+        if (ch === '"' && !isEscapedAt(text, i)) { inString = true; continue; }
+        // 找到三个反引号
+        if (ch === '`' && text[i + 1] === '`' && text[i + 2] === '`') {
+            if (isOpeningFenceAt(text, i)) { i += 2; continue; }
             return i;
         }
     }
@@ -566,6 +573,9 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
         if (closeIndex < 0) continue;
 
         const rawEnd = closeIndex + 3;
+        // 关键：成功找到 block 后推进 lastIndex，避免重复处理同一段文本
+        openRe.lastIndex = rawEnd;
+
         const json = text.slice(jsonStart, closeIndex).trim();
         if (!json) continue;
 
@@ -573,8 +583,6 @@ function extractJsonActionBlocks(text: string): JsonActionBlock[] {
             raw: text.slice(blockStart, rawEnd),
             json,
         });
-
-        openRe.lastIndex = rawEnd;
     }
 
     return blocks;
@@ -638,11 +646,12 @@ export function parseToolCalls(responseText: string): {
     let cleanText = responseText;
 
     const blocks = extractJsonActionBlocks(responseText);
-    const blocksToParse = blocks.length > 0 ? blocks : extractBareToolJsonBlocks(responseText);
 
-    for (const block of blocksToParse) {
+    let parsedCount = 0;
+    for (const block of blocks) {
         try {
             const parsed = tolerantParse(block.json);
+            parsedCount++;
             // check for tool or name
             if (parsed.tool || parsed.name) {
                 toolCalls.push({
@@ -655,6 +664,26 @@ export function parseToolCalls(responseText: string): {
         } catch (e) {
             console.error('[Converter] tolerantParse 失败:', e);
             console.error('[Converter] tolerantParse 失败 block.raw(前200字符):', block.raw.slice(0, 200));
+        }
+    }
+
+    // 最后兜底：若 fenced block 提取失败（没有块或全部 parse 抛错），尝试裸 JSON 工具块
+    if (toolCalls.length === 0 && (blocks.length === 0 || parsedCount === 0)) {
+        const bareBlocks = extractBareToolJsonBlocks(responseText);
+        for (const block of bareBlocks) {
+            try {
+                const parsed = tolerantParse(block.json);
+                if (parsed.tool || parsed.name) {
+                    toolCalls.push({
+                        name: parsed.tool || parsed.name,
+                        arguments: parsed.parameters || parsed.arguments || parsed.input || {}
+                    });
+                    cleanText = cleanText.replace(block.raw, '');
+                }
+            } catch (e) {
+                console.error('[Converter] bare tolerantParse 失败:', e);
+                console.error('[Converter] bare tolerantParse 失败 block.raw(前200字符):', block.raw.slice(0, 200));
+            }
         }
     }
 
