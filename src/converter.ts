@@ -541,26 +541,16 @@ function isOpeningFenceAt(text: string, index: number): boolean {
 }
 
 /**
- * 从 fromIndex 开始扫描 closing fence，跳过字符串内的反引号和 opening fence
+ * 从 fromIndex 开始扫描 closing fence
+ * 策略：行首匹配 — closing fence 永远是 \n``` 后面不跟字母数字
+ * 不依赖字符串状态追踪，彻底避免 Python 三引号/heredoc 干扰
  */
 function findClosingFenceIndex(text: string, fromIndex: number): number {
-    let inString = false;
-    for (let i = fromIndex; i < text.length; i++) {
-        const ch = text[i];
-        // 字符串感知：跳过 JSON 字符串内部的所有内容
-        if (inString) {
-            if (ch === '\\') { i++; continue; }
-            if (ch === '"') inString = false;
-            continue;
-        }
-        if (ch === '"') { inString = true; continue; }
-        // 找到三个反引号
-        if (ch === '`' && text[i + 1] === '`' && text[i + 2] === '`') {
-            if (isOpeningFenceAt(text, i)) { i += 2; continue; }
-            return i;
-        }
-    }
-    return -1;
+    const re = /\n```(?![a-zA-Z0-9_])/g;
+    re.lastIndex = fromIndex > 0 ? fromIndex - 1 : 0;
+    const m = re.exec(text);
+    if (!m) return -1;
+    return m.index + 1; // 跳过 \n，指向第一个反引号
 }
 
 // ==================== 响应解析 ====================
