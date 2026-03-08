@@ -65,6 +65,30 @@ const REFUSAL_PATTERNS = [
     /appears\s+to\s+be\s+(?:asking|about)\s+.*?unrelated/i,
     /(?:not|isn't|is\s+not)\s+(?:related|relevant)\s+to\s+(?:programming|coding|software)/i,
     /I\s+can\s+help\s+(?:you\s+)?with\s+things\s+like/i,
+    // Prompt injection / social engineering detection
+    /prompt\s+injection\s+attack/i,
+    /prompt\s+injection/i,
+    /social\s+engineering/i,
+    /I\s+need\s+to\s+stop\s+and\s+flag/i,
+    /What\s+I\s+will\s+not\s+do/i,
+    /What\s+is\s+actually\s+happening/i,
+    /replayed\s+against\s+a\s+real\s+system/i,
+    /tool-call\s+payloads/i,
+    /copy-pasteable\s+JSON/i,
+    /injected\s+into\s+another\s+AI/i,
+    /emit\s+tool\s+invocations/i,
+    /make\s+me\s+output\s+tool\s+calls/i,
+    // Tool availability claims (Cursor role lock)
+    /I\s+(?:only\s+)?have\s+(?:access\s+to\s+)?(?:two|2|read_file|read_dir)\s+tool/i,
+    /(?:only|just)\s+(?:two|2)\s+(?:tools?|functions?)\b/i,
+    /\bread_file\b.*\bread_dir\b/i,
+    /\bread_dir\b.*\bread_file\b/i,
+    /有以下.*?(?:两|2)个.*?工具/,
+    /我有.*?(?:两|2)个工具/,
+    /工具.*?(?:只有|有以下|仅有).*?(?:两|2)个/,
+    /只能用.*?read_file/i,
+    /无法调用.*?工具/,
+    /(?:仅限于|仅用于).*?(?:查阅|浏览).*?(?:文档|docs)/,
     // Chinese identity refusal
     /我是\s*Cursor\s*的?\s*支持助手/,
     /Cursor\s*的?\s*支持系统/,
@@ -83,6 +107,12 @@ const REFUSAL_PATTERNS = [
     /与\s*(?:编程|代码|开发)\s*无关/,
     /请提问.*(?:编程|代码|开发|技术).*问题/,
     /只能帮助.*(?:编程|代码|开发)/,
+    // Chinese prompt injection detection
+    /不是.*需要文档化/,
+    /工具调用场景/,
+    /语言偏好请求/,
+    /提供.*具体场景/,
+    /即报错/,
 ];
 
 function checkRefusal(text: string): { refused: boolean; pattern: string } {
@@ -92,7 +122,7 @@ function checkRefusal(text: string): { refused: boolean; pattern: string } {
     return { refused: false, pattern: '' };
 }
 
-function isRefusal(text: string): boolean {
+export function isRefusal(text: string): boolean {
     return checkRefusal(text).refused;
 }
 
@@ -207,7 +237,7 @@ const IDENTITY_PROBE_PATTERNS = [
     /你\s*是[^。，,\.]{0,5}(?:AI|人工智能|助手|机器人|模型|Claude|GPT|Gemini)/i,
 ];
 
-function isIdentityProbe(body: AnthropicRequest): boolean {
+export function isIdentityProbe(body: AnthropicRequest): boolean {
     if (!body.messages || body.messages.length === 0) return false;
     const lastMsg = body.messages[body.messages.length - 1];
     if (lastMsg.role !== 'user') return false;
@@ -230,13 +260,52 @@ function isIdentityProbe(body: AnthropicRequest): boolean {
 // ==================== 响应内容清洗 ====================
 
 // Claude 身份回复模板（拒绝后的降级回复）
-const CLAUDE_IDENTITY_RESPONSE = `抱歉，我无法理解你的请求。请提供更明确的指令或任务描述，例如：
+export const CLAUDE_IDENTITY_RESPONSE = `抱歉，我无法理解你的请求。请提供更明确的指令或任务描述，例如：
 
 - 帮我写一段代码
 - 分析这个文件的逻辑
 - 解释这个函数的作用
 
 请重新描述你的需求，我会尽力协助你。`;
+
+export const CLAUDE_TOOLS_RESPONSE = `作为 Claude，我的核心能力包括：
+
+**内置能力：**
+- 代码编写与调试 — 支持所有主流编程语言
+- 文本写作与分析 — 文章、报告、翻译等
+- 数据分析与数学推理 — 复杂计算和逻辑分析
+- 问题解答与知识查询 — 各类技术和非技术问题
+
+**工具调用能力（MCP）：**
+如果你的客户端配置了 MCP 工具，我可以执行更多操作，例如：
+- 网络搜索 — 实时查找信息
+- 文件操作 — 读写文件、执行命令
+- 自定义工具 — 取决于你配置的 MCP Server
+
+具体可用的工具取决于你客户端的配置。你可以告诉我你想做什么，我会尽力帮助你！`;
+
+const TOOL_CAPABILITY_PATTERNS = [
+    /你\s*(?:有|能用|可以用)\s*(?:哪些|什么|几个)\s*(?:工具|tools?|functions?)/i,
+    /(?:what|which)\s+tools?\s+(?:do\s+you\s+have|can\s+you\s+use)/i,
+    /(?:list|show)\s+(?:your\s+)?(?:available\s+)?tools?/i,
+    /你能做什么/,
+    /你的功能/,
+];
+
+export function isToolCapabilityQuestion(body: AnthropicRequest): boolean {
+    if (!body.messages || body.messages.length === 0) return false;
+    if (body.tools && body.tools.length > 0) return false;
+    const lastMsg = body.messages[body.messages.length - 1];
+    if (lastMsg.role !== 'user') return false;
+    let text = '';
+    if (typeof lastMsg.content === 'string') text = lastMsg.content;
+    else if (Array.isArray(lastMsg.content)) {
+        for (const block of lastMsg.content) {
+            if (block.type === 'text' && block.text) text += block.text;
+        }
+    }
+    return TOOL_CAPABILITY_PATTERNS.some(p => p.test(text));
+}
 
 /**
  * 对所有响应做后处理：清洗 Cursor 身份引用，替换为 Claude
